@@ -574,8 +574,9 @@ class Geometry:
         """
         # Sort component by adjacency degree (most connected first) to improve
         # the chance that overlapping solids end up in the same batch.
+        component_set = set(component)
         sorted_component = sorted(
-            component, key=lambda i: len(adjacency[i] & set(component)), reverse=True
+            component, key=lambda i: len(adjacency[i] & component_set), reverse=True
         )
 
         # Process in sequential batches.
