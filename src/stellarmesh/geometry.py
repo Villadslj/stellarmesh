@@ -19,10 +19,14 @@ from typing import (
 )
 
 try:
+    from OCP.Bnd import Bnd_Box  # pyright: ignore[reportMissingModuleSource]
     from OCP.BOPAlgo import (  # pyright: ignore[reportMissingModuleSource]
         BOPAlgo_MakeConnected,
     )
     from OCP.BRep import BRep_Builder  # pyright: ignore[reportMissingModuleSource]
+    from OCP.BRepBndLib import (  # pyright: ignore[reportMissingModuleSource]
+        BRepBndLib,
+    )
     from OCP.BRepTools import BRepTools  # pyright: ignore[reportMissingModuleSource]
     from OCP.IFSelect import (  # pyright: ignore[reportMissingModuleSource]
         IFSelect_RetDone,
@@ -315,12 +319,96 @@ class Geometry:
         )
         return cls.from_brep(filename, material_names)
 
-    def imprint(self) -> Geometry:
+    @staticmethod
+    def _get_bounding_box(
+        solid: TopoDS_Solid,
+    ) -> tuple[float, float, float, float, float, float]:
+        """Return (xmin, ymin, zmin, xmax, ymax, zmax) bounding box of a solid."""
+        bbox = Bnd_Box()
+        BRepBndLib.Add_s(solid, bbox)
+        return bbox.Get()
+
+    @staticmethod
+    def _bounding_boxes_overlap(
+        bb1: tuple[float, float, float, float, float, float],
+        bb2: tuple[float, float, float, float, float, float],
+    ) -> bool:
+        """Check if two axis-aligned bounding boxes overlap."""
+        xmin1, ymin1, zmin1, xmax1, ymax1, zmax1 = bb1
+        xmin2, ymin2, zmin2, xmax2, ymax2, zmax2 = bb2
+        return not (
+            xmax2 < xmin1
+            or xmax1 < xmin2
+            or ymax2 < ymin1
+            or ymax1 < ymin2
+            or zmax2 < zmin1
+            or zmax1 < zmin2
+        )
+
+    def _imprint_group(self, indices: list[int]) -> list[TopoDS_Solid]:
+        """Imprint a group of solids by their indices.
+
+        Args:
+            indices: Indices into self.solids to imprint together.
+
+        Returns:
+            List of imprinted solids in the same order as indices.
+        """
+        if len(indices) == 1:
+            return [self.solids[indices[0]]]
+
+        bldr = BOPAlgo_MakeConnected()
+        bldr.SetRunParallel(theFlag=True)
+        bldr.SetUseOBB(theUseOBB=True)
+
+        for idx in indices:
+            bldr.AddArgument(self.solids[idx])
+
+        bldr.Perform()
+        res = bldr.Shape()
+        res_solids = self._get_solids_from_shape(res)
+
+        if len(res_solids) != len(indices):
+            raise RuntimeError(
+                f"Length of imprinted solids {len(res_solids)} "
+                f"!= length of input solids {len(indices)}"
+            )
+
+        return res_solids
+
+    def imprint(self, batch_size: Optional[int] = None) -> Geometry:
         """Imprint faces of current geometry.
+
+        When batch_size is None (default), all solids are imprinted in a single
+        operation. For large geometries this may require excessive memory.
+
+        When batch_size is set, solids are processed in staged batches:
+        1. Bounding boxes are computed for all solids.
+        2. Solids are grouped into connected components based on AABB overlap.
+        3. Each connected component is imprinted independently. If a component
+           exceeds batch_size, it is further subdivided into batches that are
+           imprinted iteratively.
+
+        This staged approach reduces peak memory usage at the cost of additional
+        computation, similar to the approach used in OpenMSR/CAD_to_OpenMC.
+
+        Args:
+            batch_size: Maximum number of solids to imprint in a single operation.
+                If None, all solids are imprinted at once (original behavior).
 
         Returns:
             A new geometry with the imprinted and merged geometry.
         """
+        if batch_size is not None and batch_size < 2:
+            raise ValueError("batch_size must be at least 2 or None")
+
+        if batch_size is None:
+            return self._imprint_monolithic()
+
+        return self._imprint_staged(batch_size)
+
+    def _imprint_monolithic(self) -> Geometry:
+        """Imprint all solids in a single operation (original behavior)."""
         bldr = BOPAlgo_MakeConnected()
         bldr.SetRunParallel(theFlag=True)
         bldr.SetUseOBB(theUseOBB=True)
@@ -338,3 +426,145 @@ class Geometry:
             )
 
         return type(self)(res_solids, self.material_names)
+
+    def _imprint_staged(self, batch_size: int) -> Geometry:
+        """Imprint solids in stages to reduce peak memory usage.
+
+        Groups solids by AABB overlap into connected components, then imprints
+        each component. Components larger than batch_size are subdivided.
+        """
+        n = len(self.solids)
+        if n <= batch_size:
+            logger.info(
+                f"Staged imprint: {n} solids fit in one batch "
+                f"(batch_size={batch_size}), using monolithic imprint."
+            )
+            return self._imprint_monolithic()
+
+        # Compute bounding boxes.
+        logger.info(f"Staged imprint: computing bounding boxes for {n} solids.")
+        bboxes = [self._get_bounding_box(s) for s in self.solids]
+
+        # Build adjacency and find connected components.
+        adjacency = self._build_adjacency(n, bboxes)
+        components = self._find_connected_components(n, adjacency)
+
+        logger.info(
+            f"Staged imprint: found {len(components)} connected components "
+            f"(sizes: {[len(c) for c in components]})."
+        )
+
+        # Process each component.
+        result_solids: list[Optional[TopoDS_Solid]] = [None] * n
+        for component in components:
+            self._imprint_component(
+                component, batch_size, adjacency, result_solids
+            )
+
+        assert all(s is not None for s in result_solids)
+        return type(self)(
+            list(result_solids),  # type: ignore[arg-type]
+            self.material_names,
+        )
+
+    def _build_adjacency(
+        self,
+        n: int,
+        bboxes: list[tuple[float, float, float, float, float, float]],
+    ) -> list[set[int]]:
+        """Build adjacency list based on AABB overlap."""
+        adjacency: list[set[int]] = [set() for _ in range(n)]
+        for i in range(n):
+            for j in range(i + 1, n):
+                if self._bounding_boxes_overlap(bboxes[i], bboxes[j]):
+                    adjacency[i].add(j)
+                    adjacency[j].add(i)
+        return adjacency
+
+    @staticmethod
+    def _find_connected_components(
+        n: int, adjacency: list[set[int]]
+    ) -> list[list[int]]:
+        """Find connected components using BFS."""
+        visited = [False] * n
+        components: list[list[int]] = []
+        for start in range(n):
+            if visited[start]:
+                continue
+            component: list[int] = []
+            queue = [start]
+            visited[start] = True
+            while queue:
+                node = queue.pop(0)
+                component.append(node)
+                for neighbor in adjacency[node]:
+                    if not visited[neighbor]:
+                        visited[neighbor] = True
+                        queue.append(neighbor)
+            components.append(component)
+        return components
+
+    def _imprint_component(
+        self,
+        component: list[int],
+        batch_size: int,
+        adjacency: list[set[int]],
+        result_solids: list[Optional[TopoDS_Solid]],
+    ) -> None:
+        """Imprint a single connected component, batching if needed."""
+        if len(component) == 1:
+            result_solids[component[0]] = self.solids[component[0]]
+        elif len(component) <= batch_size:
+            logger.info(
+                f"Staged imprint: imprinting component of "
+                f"{len(component)} solids."
+            )
+            imprinted = self._imprint_group(component)
+            for idx, solid in zip(component, imprinted, strict=True):
+                result_solids[idx] = solid
+        else:
+            logger.info(
+                f"Staged imprint: subdividing component of "
+                f"{len(component)} solids into batches of {batch_size}."
+            )
+            self._imprint_large_component(
+                component, batch_size, adjacency, result_solids
+            )
+
+    def _imprint_large_component(
+        self,
+        component: list[int],
+        batch_size: int,
+        adjacency: list[set[int]],
+        result_solids: list[Optional[TopoDS_Solid]],
+    ) -> None:
+        """Imprint a large connected component in batches.
+
+        Processes the component in sequential batches of batch_size.
+
+        Args:
+            component: Indices of solids in this connected component.
+            batch_size: Maximum solids per batch.
+            adjacency: Adjacency list for AABB overlap.
+            result_solids: Output list to populate with imprinted solids.
+        """
+        # Sort component by adjacency degree (most connected first) to improve
+        # the chance that overlapping solids end up in the same batch.
+        sorted_component = sorted(
+            component, key=lambda i: len(adjacency[i] & set(component)), reverse=True
+        )
+
+        # Process in sequential batches.
+        processed = 0
+        while processed < len(sorted_component):
+            batch_indices = sorted_component[processed : processed + batch_size]
+            logger.info(
+                f"Staged imprint: processing batch of {len(batch_indices)} solids "
+                f"({processed}/{len(sorted_component)} done)."
+            )
+            imprinted = self._imprint_group(batch_indices)
+            for idx, solid in zip(batch_indices, imprinted, strict=True):
+                result_solids[idx] = solid
+                # Update self.solids so subsequent batches use imprinted versions.
+                self.solids[idx] = solid
+            processed += batch_size

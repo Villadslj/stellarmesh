@@ -57,3 +57,18 @@ class TestGeometryImportExport:
 class TestGeometryOperations:
     def test_geometry_imprint(self, geom_bd_layered_torus):
         geom_bd_layered_torus.imprint()
+
+    def test_geometry_imprint_staged(self, geom_bd_layered_torus):
+        result = geom_bd_layered_torus.imprint(batch_size=2)
+        assert len(result.solids) == len(geom_bd_layered_torus.solids)
+        assert result.material_names == geom_bd_layered_torus.material_names
+
+    def test_geometry_imprint_staged_batch_size_equals_solids(
+        self, geom_bd_layered_torus
+    ):
+        result = geom_bd_layered_torus.imprint(batch_size=10)
+        assert len(result.solids) == len(geom_bd_layered_torus.solids)
+
+    def test_geometry_imprint_batch_size_validation(self, geom_bd_layered_torus):
+        with pytest.raises(ValueError, match="batch_size must be at least 2"):
+            geom_bd_layered_torus.imprint(batch_size=1)
