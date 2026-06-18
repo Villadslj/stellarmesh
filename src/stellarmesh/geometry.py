@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import warnings
+from collections import deque
 from typing import (
     Optional,
     Protocol,
@@ -354,19 +355,34 @@ class Geometry:
         Returns:
             List of imprinted solids in the same order as indices.
         """
+        return self._imprint_group_from(indices, self.solids)
+
+    @staticmethod
+    def _imprint_group_from(
+        indices: list[int], solids: list[TopoDS_Solid]
+    ) -> list[TopoDS_Solid]:
+        """Imprint a group of solids from a given solids list.
+
+        Args:
+            indices: Indices into solids to imprint together.
+            solids: The list of solids to index into.
+
+        Returns:
+            List of imprinted solids in the same order as indices.
+        """
         if len(indices) == 1:
-            return [self.solids[indices[0]]]
+            return [solids[indices[0]]]
 
         bldr = BOPAlgo_MakeConnected()
         bldr.SetRunParallel(theFlag=True)
         bldr.SetUseOBB(theUseOBB=True)
 
         for idx in indices:
-            bldr.AddArgument(self.solids[idx])
+            bldr.AddArgument(solids[idx])
 
         bldr.Perform()
         res = bldr.Shape()
-        res_solids = self._get_solids_from_shape(res)
+        res_solids = Geometry._get_solids_from_shape(res)
 
         if len(res_solids) != len(indices):
             raise RuntimeError(
@@ -456,12 +472,17 @@ class Geometry:
 
         # Process each component.
         result_solids: list[Optional[TopoDS_Solid]] = [None] * n
+        # Work on a copy to avoid mutating self.solids during batch processing.
+        working_solids = list(self.solids)
         for component in components:
             self._imprint_component(
-                component, batch_size, adjacency, result_solids
+                component, batch_size, adjacency, result_solids, working_solids
             )
 
-        assert all(s is not None for s in result_solids)
+        if not all(s is not None for s in result_solids):
+            raise RuntimeError(
+                "Staged imprint failed: not all solids were processed."
+            )
         return type(self)(
             list(result_solids),  # type: ignore[arg-type]
             self.material_names,
@@ -492,10 +513,10 @@ class Geometry:
             if visited[start]:
                 continue
             component: list[int] = []
-            queue = [start]
+            queue: deque[int] = deque([start])
             visited[start] = True
             while queue:
-                node = queue.pop(0)
+                node = queue.popleft()
                 component.append(node)
                 for neighbor in adjacency[node]:
                     if not visited[neighbor]:
@@ -510,16 +531,17 @@ class Geometry:
         batch_size: int,
         adjacency: list[set[int]],
         result_solids: list[Optional[TopoDS_Solid]],
+        working_solids: list[TopoDS_Solid],
     ) -> None:
         """Imprint a single connected component, batching if needed."""
         if len(component) == 1:
-            result_solids[component[0]] = self.solids[component[0]]
+            result_solids[component[0]] = working_solids[component[0]]
         elif len(component) <= batch_size:
             logger.info(
                 f"Staged imprint: imprinting component of "
                 f"{len(component)} solids."
             )
-            imprinted = self._imprint_group(component)
+            imprinted = self._imprint_group_from(component, working_solids)
             for idx, solid in zip(component, imprinted, strict=True):
                 result_solids[idx] = solid
         else:
@@ -528,7 +550,7 @@ class Geometry:
                 f"{len(component)} solids into batches of {batch_size}."
             )
             self._imprint_large_component(
-                component, batch_size, adjacency, result_solids
+                component, batch_size, adjacency, result_solids, working_solids
             )
 
     def _imprint_large_component(
@@ -537,6 +559,7 @@ class Geometry:
         batch_size: int,
         adjacency: list[set[int]],
         result_solids: list[Optional[TopoDS_Solid]],
+        working_solids: list[TopoDS_Solid],
     ) -> None:
         """Imprint a large connected component in batches.
 
@@ -547,6 +570,7 @@ class Geometry:
             batch_size: Maximum solids per batch.
             adjacency: Adjacency list for AABB overlap.
             result_solids: Output list to populate with imprinted solids.
+            working_solids: Mutable working copy of solids list.
         """
         # Sort component by adjacency degree (most connected first) to improve
         # the chance that overlapping solids end up in the same batch.
@@ -562,9 +586,9 @@ class Geometry:
                 f"Staged imprint: processing batch of {len(batch_indices)} solids "
                 f"({processed}/{len(sorted_component)} done)."
             )
-            imprinted = self._imprint_group(batch_indices)
+            imprinted = self._imprint_group_from(batch_indices, working_solids)
             for idx, solid in zip(batch_indices, imprinted, strict=True):
                 result_solids[idx] = solid
-                # Update self.solids so subsequent batches use imprinted versions.
-                self.solids[idx] = solid
+                # Update working_solids so subsequent batches use imprinted versions.
+                working_solids[idx] = solid
             processed += batch_size
