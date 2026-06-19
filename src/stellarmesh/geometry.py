@@ -274,7 +274,12 @@ class Geometry:
         Returns:
             List of part name strings, one per solid.
         """
-        app = XCAFApp_Application.GetApplication_s()
+        # Support both newer OCP (with _s suffix for static methods) and older
+        # versions (without _s suffix).
+        _get_application = getattr(
+            XCAFApp_Application, "GetApplication_s", None
+        ) or XCAFApp_Application.GetApplication
+        app = _get_application()
         # "XmlOcaf" is the standard XDE document format for OCAF applications.
         doc = TDocStd_Document(TCollection_ExtendedString("XmlOcaf"))
         app.InitDocument(doc)
@@ -286,7 +291,10 @@ class Geometry:
             raise ValueError(f"STEP File {filename} could not be loaded")
         caf_reader.Transfer(doc)
 
-        shape_tool = XCAFDoc_ShapeTool.GetTool_s(doc.Main())
+        _get_tool = getattr(
+            XCAFDoc_ShapeTool, "GetTool_s", None
+        ) or XCAFDoc_ShapeTool.GetTool
+        shape_tool = _get_tool(doc.Main())
 
         labels = TDF_LabelSequence()
         shape_tool.GetFreeShapes(labels)
@@ -295,7 +303,8 @@ class Geometry:
         def _get_label_name(label: TDF_Label) -> str:
             """Get the name attribute from a label, or empty string."""
             name_attr = TDataStd_Name()
-            if label.FindAttribute(TDataStd_Name.GetID_s(), name_attr):
+            _get_id = getattr(TDataStd_Name, "GetID_s", None) or TDataStd_Name.GetID
+            if label.FindAttribute(_get_id(), name_attr):
                 name_str = name_attr.Get()
                 return str(name_str) if name_str else ""
             return ""
