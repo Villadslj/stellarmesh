@@ -42,6 +42,12 @@ class TestGeometryImportExport:
         bd.export_step(model_bd_layered_torus[0], "layer.step")
         sm.Geometry.from_step("layer.step", material_names=[""])
 
+    def test_step_import_auto_names(self, model_bd_layered_torus):
+        cmp = bd.Compound(model_bd_layered_torus)
+        bd.export_step(cmp, "model.step")
+        geom = sm.Geometry.from_step("model.step")
+        assert len(geom.material_names) == 3
+
     def test_brep_import_compound(self, model_bd_layered_torus):
         cmp = bd.Compound(model_bd_layered_torus)
         bd.export_brep(cmp, "model.brep")
@@ -72,3 +78,30 @@ class TestGeometryOperations:
     def test_geometry_imprint_batch_size_validation(self, geom_bd_layered_torus):
         with pytest.raises(ValueError, match="batch_size must be at least 2"):
             geom_bd_layered_torus.imprint(batch_size=1)
+
+
+class TestMaterialNames:
+    def test_get_material_names(self, model_bd_layered_torus):
+        material_names = ["mat_a", "mat_b", "mat_c"]
+        geom = sm.Geometry(model_bd_layered_torus, material_names=material_names)
+        assert geom.get_material_names() == material_names
+
+    def test_get_material_names_returns_copy(self, model_bd_layered_torus):
+        material_names = ["mat_a", "mat_b", "mat_c"]
+        geom = sm.Geometry(model_bd_layered_torus, material_names=material_names)
+        result = geom.get_material_names()
+        result[0] = "modified"
+        assert geom.material_names[0] == "mat_a"
+
+    def test_set_material_names(self, model_bd_layered_torus):
+        material_names = ["mat_a", "mat_b", "mat_c"]
+        geom = sm.Geometry(model_bd_layered_torus, material_names=material_names)
+        new_names = ["new_a", "new_b", "new_c"]
+        geom.set_material_names(new_names)
+        assert geom.material_names == new_names
+
+    def test_set_material_names_wrong_length(self, model_bd_layered_torus):
+        material_names = ["mat_a", "mat_b", "mat_c"]
+        geom = sm.Geometry(model_bd_layered_torus, material_names=material_names)
+        with pytest.raises(ValueError, match="does not match"):
+            geom.set_material_names(["only_one"])
