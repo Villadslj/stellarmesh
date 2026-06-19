@@ -275,6 +275,7 @@ class Geometry:
             List of part name strings, one per solid.
         """
         app = XCAFApp_Application.GetApplication_s()
+        # "XmlOcaf" is the standard XDE document format for OCAF applications.
         doc = TDocStd_Document(TCollection_ExtendedString("XmlOcaf"))
         app.InitDocument(doc)
 

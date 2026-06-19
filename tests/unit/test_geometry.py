@@ -91,7 +91,7 @@ class TestMaterialNames:
         geom = sm.Geometry(model_bd_layered_torus, material_names=material_names)
         result = geom.get_material_names()
         result[0] = "modified"
-        assert geom.material_names[0] == "mat_a"
+        assert geom.get_material_names()[0] == "mat_a"
 
     def test_set_material_names(self, model_bd_layered_torus):
         material_names = ["mat_a", "mat_b", "mat_c"]
