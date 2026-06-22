@@ -12,6 +12,7 @@ import logging
 import warnings
 from collections import deque
 from typing import (
+    Callable,
     Optional,
     Protocol,
     Sequence,
@@ -32,8 +33,22 @@ try:
     from OCP.IFSelect import (  # pyright: ignore[reportMissingModuleSource]
         IFSelect_RetDone,
     )
+    from OCP.STEPCAFControl import (  # pyright: ignore[reportMissingModuleSource]
+        STEPCAFControl_Reader,
+    )
     from OCP.STEPControl import (  # pyright: ignore[reportMissingModuleSource]
         STEPControl_Reader,
+    )
+    from OCP.TCollection import (  # pyright: ignore[reportMissingModuleSource]
+        TCollection_ExtendedString,
+    )
+    from OCP.TDataStd import TDataStd_Name  # pyright: ignore[reportMissingModuleSource]
+    from OCP.TDF import (  # pyright: ignore[reportMissingModuleSource]
+        TDF_Label,
+        TDF_LabelSequence,
+    )
+    from OCP.TDocStd import (
+        TDocStd_Document,  # pyright: ignore[reportMissingModuleSource]
     )
     from OCP.TopAbs import (  # pyright: ignore[reportMissingModuleSource]
         TopAbs_ShapeEnum,
@@ -47,12 +62,39 @@ try:
         TopoDS_Shell,
         TopoDS_Solid,
     )
+    from OCP.XCAFApp import (  # pyright: ignore[reportMissingModuleSource]
+        XCAFApp_Application,
+    )
+    from OCP.XCAFDoc import (  # pyright: ignore[reportMissingModuleSource]
+        XCAFDoc_DocumentTool,
+        XCAFDoc_ShapeTool,
+    )
 except ImportError as e:
     raise ImportError(
         "OCP not found. See Stellarmesh installation instructions."
     ) from e
 
 logger = logging.getLogger(__name__)
+
+
+def _get_ocp_method(obj: object, name: str) -> Callable[..., object]:
+    """Return the OCP method, supporting both suffixed and unsuffixed names."""
+    method = getattr(obj, f"{name}_s", None) or getattr(obj, name, None)
+    if method is None:
+        raise AttributeError(f"{obj!r} has no {name} or {name}_s method")
+    return method
+
+
+def _ocp_string_to_str(value: object) -> str:
+    """Convert OCP string wrapper objects to Python strings."""
+    if isinstance(value, str):
+        return value
+
+    to_ext_string = getattr(value, "ToExtString", None)
+    if callable(to_ext_string):
+        return to_ext_string()
+
+    return str(value)
 
 
 class Face(Protocol):
@@ -164,6 +206,31 @@ class Geometry:
                         f"Surface {i} is of invalid type {type(s).__name__}"
                     )
 
+    def get_material_names(self) -> list[str]:
+        """Return a copy of the current material names.
+
+        Returns:
+            List of material name strings, one per solid.
+        """
+        return list(self.material_names)
+
+    def set_material_names(self, material_names: Sequence[str]) -> None:
+        """Set new material names for the geometry.
+
+        Args:
+            material_names: List of material names. Must match the number of solids.
+
+        Raises:
+            ValueError: If the length of material_names does not match the number of
+                solids.
+        """
+        if len(material_names) != len(self.solids):
+            raise ValueError(
+                f"Length of material_names ({len(material_names)}) does not match "
+                f"number of solids ({len(self.solids)})."
+            )
+        self.material_names = list(material_names)
+
     @staticmethod
     @overload
     def _get_child_shapes(
@@ -215,19 +282,114 @@ class Geometry:
             solids = cls._get_child_shapes(shape, TopoDS_Solid)
         return solids
 
+    @classmethod
+    def _extract_step_part_names(cls, filename: str, n_solids: int) -> list[str]:
+        """Extract part names from a STEP file using the XDE framework.
+
+        Reads the STEP file with XDE (Extended Data Framework) to access the
+        assembly structure and extract the name associated with each solid.
+
+        Args:
+            filename: Path to the STEP file.
+            n_solids: Expected number of solids (for validation).
+
+        Returns:
+            List of part name strings, one per solid.
+        """
+        app = _get_ocp_method(XCAFApp_Application, "GetApplication")()
+        # "XmlOcaf" is the standard XDE document format for OCAF applications.
+        doc = TDocStd_Document(TCollection_ExtendedString("XmlOcaf"))
+        app.InitDocument(doc)
+
+        caf_reader = STEPCAFControl_Reader()
+        caf_reader.SetNameMode(True)  # noqa: FBT003
+        read_status = caf_reader.ReadFile(filename)
+        if read_status != IFSelect_RetDone:
+            raise ValueError(f"STEP File {filename} could not be loaded")
+        caf_reader.Transfer(doc)
+
+        _get_shape_tool = (
+            getattr(XCAFDoc_DocumentTool, "ShapeTool_s", None)
+            or getattr(XCAFDoc_DocumentTool, "ShapeTool", None)
+            or getattr(XCAFDoc_ShapeTool, "GetTool_s", None)
+            or getattr(XCAFDoc_ShapeTool, "GetTool", None)
+        )
+        if _get_shape_tool is None:
+            raise AttributeError(
+                "No compatible XCAF shape tool accessor found in this OCP build"
+            )
+        shape_tool = _get_shape_tool(doc.Main())
+
+        labels = TDF_LabelSequence()
+        shape_tool.GetFreeShapes(labels)
+        names: list[str] = []
+
+        def _get_label_name(label: TDF_Label) -> str:
+            """Get the name attribute from a label, or empty string."""
+            name_attr = TDataStd_Name()
+            if label.FindAttribute(
+                _get_ocp_method(TDataStd_Name, "GetID")(), name_attr
+            ):
+                name_str = name_attr.Get()
+                return _ocp_string_to_str(name_str) if name_str else ""
+            return ""
+
+        def _collect_names_from_label(label: TDF_Label) -> None:
+            """Recursively collect names for solid shapes from label tree."""
+            shape = _get_ocp_method(shape_tool, "GetShape")(label)
+            if shape is None or shape.IsNull():
+                return
+
+            if shape.ShapeType() == TopAbs_SOLID:
+                names.append(_get_label_name(label))
+            elif shape.ShapeType() in (
+                TopAbs_ShapeEnum.TopAbs_COMPOUND,
+                TopAbs_ShapeEnum.TopAbs_COMPSOLID,
+            ):
+                # Recurse into sub-labels (components of assembly)
+                sub_labels = TDF_LabelSequence()
+                _get_ocp_method(shape_tool, "GetComponents")(label, sub_labels)
+                for j in range(sub_labels.Length()):
+                    sub_label = sub_labels.Value(j + 1)
+                    ref_label = TDF_Label()
+                    if _get_ocp_method(shape_tool, "GetReferredShape")(
+                        sub_label, ref_label
+                    ):
+                        _collect_names_from_label(ref_label)
+                    else:
+                        _collect_names_from_label(sub_label)
+
+        for i in range(labels.Length()):
+            label = labels.Value(i + 1)
+            _collect_names_from_label(label)
+
+        if len(names) != n_solids:
+            logger.warning(
+                f"Number of extracted part names ({len(names)}) does not match "
+                f"number of solids ({n_solids}). Using generic names."
+            )
+            names = [f"solid_{i}" for i in range(n_solids)]
+
+        logger.info(f"Extracted material names from STEP file: {names}")
+        return names
+
     # TODO(akoen): from_step and from_brep are not DRY
     # https://github.com/Thea-Energy/stellarmesh/issues/2
     @classmethod
     def from_step(
         cls,
         filename: str,
-        material_names: Sequence[str],
+        material_names: Optional[Sequence[str]] = None,
     ) -> Geometry:
         """Import model from a step file.
+
+        If material_names is not provided, names are automatically extracted from
+        the assembly part names in the STEP file.
 
         Args:
             filename: File path to import.
             material_names: Ordered list of material names matching solids in file.
+                If None, material names are extracted from STEP part names.
 
         Returns:
             Model.
@@ -246,13 +408,16 @@ class Geometry:
             shape = reader.Shape(i + 1)
             solids.extend(cls._get_solids_from_shape(shape))
 
+        if material_names is None:
+            material_names = cls._extract_step_part_names(filename, len(solids))
+
         return cls(solids, material_names)
 
     @classmethod
     def import_step(
         cls,
         filename: str,
-        material_names: Sequence[str],
+        material_names: Optional[Sequence[str]] = None,
     ) -> Geometry:
         """Import model from a step file.
 
