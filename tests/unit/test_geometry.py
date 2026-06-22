@@ -1,4 +1,5 @@
 import build123d as bd
+import cadquery as cq
 import pytest
 import stellarmesh as sm
 
@@ -47,6 +48,16 @@ class TestGeometryImportExport:
         bd.export_step(cmp, "model.step")
         geom = sm.Geometry.from_step("model.step")
         assert len(geom.material_names) == 3
+
+    def test_step_import_auto_names_from_named_assembly(self):
+        assy = cq.Assembly(name="top")
+        assy.add(cq.Workplane().box(1, 1, 1), name="ss")
+        assy.add(cq.Workplane().translate((2, 0, 0)).box(1, 1, 1), name="fs")
+        assy.save("named.step")
+
+        geom = sm.Geometry.from_step("named.step")
+
+        assert geom.material_names == ["ss", "fs"]
 
     def test_brep_import_compound(self, model_bd_layered_torus):
         cmp = bd.Compound(model_bd_layered_torus)

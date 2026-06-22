@@ -12,6 +12,7 @@ import logging
 import warnings
 from collections import deque
 from typing import (
+    Callable,
     Optional,
     Protocol,
     Sequence,
@@ -65,6 +66,7 @@ try:
         XCAFApp_Application,
     )
     from OCP.XCAFDoc import (  # pyright: ignore[reportMissingModuleSource]
+        XCAFDoc_DocumentTool,
         XCAFDoc_ShapeTool,
     )
 except ImportError as e:
@@ -73,6 +75,26 @@ except ImportError as e:
     ) from e
 
 logger = logging.getLogger(__name__)
+
+
+def _get_ocp_method(obj: object, name: str) -> Callable[..., object]:
+    """Return the OCP method, supporting both suffixed and unsuffixed names."""
+    method = getattr(obj, f"{name}_s", None) or getattr(obj, name, None)
+    if method is None:
+        raise AttributeError(f"{obj!r} has no {name} or {name}_s method")
+    return method
+
+
+def _ocp_string_to_str(value: object) -> str:
+    """Convert OCP string wrapper objects to Python strings."""
+    if isinstance(value, str):
+        return value
+
+    to_ext_string = getattr(value, "ToExtString", None)
+    if callable(to_ext_string):
+        return to_ext_string()
+
+    return str(value)
 
 
 class Face(Protocol):
@@ -274,12 +296,7 @@ class Geometry:
         Returns:
             List of part name strings, one per solid.
         """
-        # Support both newer OCP (with _s suffix for static methods) and older
-        # versions (without _s suffix).
-        _get_application = getattr(
-            XCAFApp_Application, "GetApplication_s", None
-        ) or XCAFApp_Application.GetApplication
-        app = _get_application()
+        app = _get_ocp_method(XCAFApp_Application, "GetApplication")()
         # "XmlOcaf" is the standard XDE document format for OCAF applications.
         doc = TDocStd_Document(TCollection_ExtendedString("XmlOcaf"))
         app.InitDocument(doc)
@@ -291,10 +308,17 @@ class Geometry:
             raise ValueError(f"STEP File {filename} could not be loaded")
         caf_reader.Transfer(doc)
 
-        _get_tool = getattr(
-            XCAFDoc_ShapeTool, "GetTool_s", None
-        ) or XCAFDoc_ShapeTool.GetTool
-        shape_tool = _get_tool(doc.Main())
+        _get_shape_tool = (
+            getattr(XCAFDoc_DocumentTool, "ShapeTool_s", None)
+            or getattr(XCAFDoc_DocumentTool, "ShapeTool", None)
+            or getattr(XCAFDoc_ShapeTool, "GetTool_s", None)
+            or getattr(XCAFDoc_ShapeTool, "GetTool", None)
+        )
+        if _get_shape_tool is None:
+            raise AttributeError(
+                "No compatible XCAF shape tool accessor found in this OCP build"
+            )
+        shape_tool = _get_shape_tool(doc.Main())
 
         labels = TDF_LabelSequence()
         shape_tool.GetFreeShapes(labels)
@@ -303,15 +327,16 @@ class Geometry:
         def _get_label_name(label: TDF_Label) -> str:
             """Get the name attribute from a label, or empty string."""
             name_attr = TDataStd_Name()
-            _get_id = getattr(TDataStd_Name, "GetID_s", None) or TDataStd_Name.GetID
-            if label.FindAttribute(_get_id(), name_attr):
+            if label.FindAttribute(
+                _get_ocp_method(TDataStd_Name, "GetID")(), name_attr
+            ):
                 name_str = name_attr.Get()
-                return str(name_str) if name_str else ""
+                return _ocp_string_to_str(name_str) if name_str else ""
             return ""
 
         def _collect_names_from_label(label: TDF_Label) -> None:
             """Recursively collect names for solid shapes from label tree."""
-            shape = shape_tool.GetShape(label)
+            shape = _get_ocp_method(shape_tool, "GetShape")(label)
             if shape is None or shape.IsNull():
                 return
 
@@ -323,11 +348,13 @@ class Geometry:
             ):
                 # Recurse into sub-labels (components of assembly)
                 sub_labels = TDF_LabelSequence()
-                shape_tool.GetComponents(label, sub_labels)
+                _get_ocp_method(shape_tool, "GetComponents")(label, sub_labels)
                 for j in range(sub_labels.Length()):
                     sub_label = sub_labels.Value(j + 1)
                     ref_label = TDF_Label()
-                    if shape_tool.GetReferredShape(sub_label, ref_label):
+                    if _get_ocp_method(shape_tool, "GetReferredShape")(
+                        sub_label, ref_label
+                    ):
                         _collect_names_from_label(ref_label)
                     else:
                         _collect_names_from_label(sub_label)
