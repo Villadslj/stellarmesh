@@ -23,7 +23,7 @@ import meshio
 import numpy as np
 
 from ._core import PathLike
-from .geometry import Geometry
+from .geometry import Geometry, _get_ocp_method
 
 try:
     import gmsh
@@ -522,12 +522,12 @@ class SurfaceMesh(Mesh):
         for shape in geometry.solids + geometry.faces:
             explorer = TopExp_Explorer(shape, TopAbs_FACE)
             while explorer.More():
-                face = TopoDS.Face_s(explorer.Current())
+                face = _get_ocp_method(TopoDS, "Face")(explorer.Current())
                 # OCC ignores the deflection if the shape tolerance is less than the
                 # deflection
                 tolerance_tool.LimitTolerance(face, 0, params.Deflection)
                 # Remove any existing triangulation on the shape
-                BRepTools.Clean_s(face)
+                _get_ocp_method(BRepTools, "Clean")(face)
                 explorer.Next()
 
             cmp_builder.Add(cmp, shape)
@@ -539,7 +539,7 @@ class SurfaceMesh(Mesh):
         known_surface_tags = []
         explorer = TopExp_Explorer(cmp, TopAbs_FACE)
         while explorer.More():
-            face = TopoDS.Face_s(explorer.Current())
+            face = _get_ocp_method(TopoDS, "Face")(explorer.Current())
 
             # This returns the existing dim_tag if face is already bound
             dim_tags = cls._import_occ(face, native=True)
@@ -550,7 +550,7 @@ class SurfaceMesh(Mesh):
                 continue
             known_surface_tags.append(surface_tag)
 
-            poly_triangulation = BRep_Tool.Triangulation_s(face, loc)
+            poly_triangulation = _get_ocp_method(BRep_Tool, "Triangulation")(face, loc)
             trsf = loc.Transformation()
 
             # Store vertices
@@ -595,7 +595,7 @@ class SurfaceMesh(Mesh):
             dim_tags = gmsh.model.occ.import_shapes_native_pointer(shape._address())
             return dim_tags
         with tempfile.NamedTemporaryFile(suffix=".brep") as tmp_file:
-            BRepTools.Write_s(shape, tmp_file.name)
+            _get_ocp_method(BRepTools, "Write")(shape, tmp_file.name)
             dim_tags = gmsh.model.occ.import_shapes(tmp_file.name)
             return dim_tags
 

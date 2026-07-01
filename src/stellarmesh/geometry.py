@@ -78,7 +78,11 @@ logger = logging.getLogger(__name__)
 
 
 def _get_ocp_method(obj: object, name: str) -> Callable[..., object]:
-    """Return the OCP method, supporting both suffixed and unsuffixed names."""
+    """Return the OCP method, supporting both suffixed and unsuffixed names.
+
+    Newer OCP versions (>=7.8) removed the ``_s`` suffix from static methods.
+    This helper tries the suffixed name first (older builds) then the bare name.
+    """
     method = getattr(obj, f"{name}_s", None) or getattr(obj, name, None)
     if method is None:
         raise AttributeError(f"{obj!r} has no {name} or {name}_s method")
@@ -277,7 +281,7 @@ class Geometry:
         """Return all the solids in this shape."""
         solids: list[TopoDS_Solid] = []
         if shape.ShapeType() == TopAbs_ShapeEnum.TopAbs_SOLID:
-            solids.append(TopoDS.Solid_s(shape))
+            solids.append(_get_ocp_method(TopoDS, "Solid")(shape))
         elif shape.ShapeType() == TopAbs_ShapeEnum.TopAbs_COMPOUND:
             solids = cls._get_child_shapes(shape, TopoDS_Solid)
         return solids
@@ -454,7 +458,7 @@ class Geometry:
 
         shape = TopoDS_Shape()
         builder = BRep_Builder()
-        BRepTools.Read_s(shape, filename, builder)
+        _get_ocp_method(BRepTools, "Read")(shape, filename, builder)
 
         if shape.IsNull():
             raise ValueError(f"Could not import {filename}")
@@ -491,7 +495,7 @@ class Geometry:
     ) -> tuple[float, float, float, float, float, float]:
         """Return (xmin, ymin, zmin, xmax, ymax, zmax) bounding box of a solid."""
         bbox = Bnd_Box()
-        BRepBndLib.Add_s(solid, bbox)
+        _get_ocp_method(BRepBndLib, "Add")(solid, bbox)
         return bbox.Get()
 
     @staticmethod
@@ -645,9 +649,7 @@ class Geometry:
             )
 
         if not all(s is not None for s in result_solids):
-            raise RuntimeError(
-                "Staged imprint failed: not all solids were processed."
-            )
+            raise RuntimeError("Staged imprint failed: not all solids were processed.")
         return type(self)(
             list(result_solids),  # type: ignore[arg-type]
             self.material_names,
@@ -703,8 +705,7 @@ class Geometry:
             result_solids[component[0]] = working_solids[component[0]]
         elif len(component) <= batch_size:
             logger.info(
-                f"Staged imprint: imprinting component of "
-                f"{len(component)} solids."
+                f"Staged imprint: imprinting component of {len(component)} solids."
             )
             imprinted = self._imprint_group_from(component, working_solids)
             for idx, solid in zip(component, imprinted, strict=True):
