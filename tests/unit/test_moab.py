@@ -114,12 +114,19 @@ class TestDAGMCModel:
 
     def test_material_to_volume_ids(self, dagmc_model_named_parts):
         mapping = dagmc_model_named_parts.material_to_volume_ids
-        assert mapping["part_a"] == [1]
-        assert mapping["part_b"] == [2]
+        assert len(mapping["part_a"]) == 1
+        assert len(mapping["part_b"]) == 1
+        assert set(mapping["part_a"]).isdisjoint(mapping["part_b"])
+        assert set(mapping["part_a"] + mapping["part_b"]) == {
+            vol.global_id for vol in dagmc_model_named_parts.volumes
+        }
 
     def test_volume_bounding_box(self, dagmc_model_named_parts):
-        vol_a_bbox = dagmc_model_named_parts.volumes[0].bounding_box
-        vol_b_bbox = dagmc_model_named_parts.volumes[1].bounding_box
+        volumes_by_id = {v.global_id: v for v in dagmc_model_named_parts.volumes}
+        part_a_id = dagmc_model_named_parts.material_to_volume_ids["part_a"][0]
+        part_b_id = dagmc_model_named_parts.material_to_volume_ids["part_b"][0]
+        vol_a_bbox = volumes_by_id[part_a_id].bounding_box
+        vol_b_bbox = volumes_by_id[part_b_id].bounding_box
         assert vol_a_bbox[0] == pytest.approx((0.0, 0.0, 0.0), abs=1e-8)
         assert vol_a_bbox[1] == pytest.approx((10.0, 10.0, 10.0), abs=1e-8)
         assert vol_b_bbox[0] == pytest.approx((0.0, 5.0, 10.0), abs=1e-8)
@@ -127,7 +134,10 @@ class TestDAGMCModel:
 
     def test_model_bounding_box_by_name_and_ids(self, dagmc_model_named_parts):
         bbox_from_name = dagmc_model_named_parts.bounding_box("part_b")
-        bbox_from_ids = dagmc_model_named_parts.bounding_box([1, 2])
+        bbox_from_ids = dagmc_model_named_parts.bounding_box(
+            dagmc_model_named_parts.material_to_volume_ids["part_a"]
+            + dagmc_model_named_parts.material_to_volume_ids["part_b"]
+        )
         assert bbox_from_name[0] == pytest.approx((0.0, 5.0, 10.0), abs=1e-8)
         assert bbox_from_name[1] == pytest.approx((10.0, 15.0, 20.0), abs=1e-8)
         assert bbox_from_ids[0] == pytest.approx((0.0, 0.0, 0.0), abs=1e-8)

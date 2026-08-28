@@ -360,8 +360,8 @@ class DAGMCVolume(DAGMCEntitySet):
             if triangles.empty():
                 continue
 
-            vertices = self.model._core.get_connectivity(triangles)
-            if len(vertices) == 0:
+            vertices = np.unique(self.model._core.get_connectivity(triangles))
+            if vertices.size == 0:
                 continue
 
             coords = self.model._core.get_coords(vertices).reshape(-1, 3)
@@ -610,9 +610,12 @@ class DAGMCModel(MOABModel):
             volume_ids = set(self.material_to_volume_ids[volume_ids_or_name])
         else:
             volume_ids = set(volume_ids_or_name)
-
-        if not volume_ids:
-            raise ValueError("No volume IDs were provided.")
+            if not volume_ids:
+                raise ValueError("No volume IDs were provided.")
+        if isinstance(volume_ids_or_name, str) and not volume_ids:
+            raise ValueError(
+                f"Material/part '{volume_ids_or_name}' has no associated volumes."
+            )
 
         selected_volumes = [v for v in self.volumes if v.global_id in volume_ids]
         found_volume_ids = {v.global_id for v in selected_volumes}
