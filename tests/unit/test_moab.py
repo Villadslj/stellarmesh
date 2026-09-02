@@ -13,6 +13,15 @@ def dagmc_model():
     return sm.DAGMCModel.from_mesh(mesh)
 
 
+@pytest.fixture(scope="module")
+def dagmc_model_named_parts():
+    box1 = bd.Solid.make_box(10.0, 10.0, 10.0)
+    box2 = box1.transformed(offset=(0.0, 5.0, 10.0))
+    geom = sm.Geometry([box1, box2], ["part_a", "part_b"])
+    mesh = sm.SurfaceMesh.from_geometry(geom, sm.GmshSurfaceOptions(max_mesh_size=5))
+    return sm.DAGMCModel.from_mesh(mesh)
+
+
 class TestDAGMCModel:
     def test_surfaces(self, dagmc_model):
         assert isinstance(dagmc_model.surfaces, list)
@@ -102,6 +111,44 @@ class TestDAGMCModel:
     def test_hash(self, dagmc_model):
         objects = {dagmc_model.surfaces[0], dagmc_model.volumes[0]}
         assert len(objects) == 2
+
+    def test_material_to_volume_ids(self, dagmc_model_named_parts):
+        mapping = dagmc_model_named_parts.material_to_volume_ids
+        assert len(mapping["part_a"]) == 1
+        assert len(mapping["part_b"]) == 1
+        assert set(mapping["part_a"]).isdisjoint(mapping["part_b"])
+        assert set(mapping["part_a"] + mapping["part_b"]) == {
+            vol.global_id for vol in dagmc_model_named_parts.volumes
+        }
+
+    def test_volume_bounding_box(self, dagmc_model_named_parts):
+        volumes_by_id = {v.global_id: v for v in dagmc_model_named_parts.volumes}
+        part_a_id = dagmc_model_named_parts.material_to_volume_ids["part_a"][0]
+        part_b_id = dagmc_model_named_parts.material_to_volume_ids["part_b"][0]
+        vol_a_bbox = volumes_by_id[part_a_id].bounding_box
+        vol_b_bbox = volumes_by_id[part_b_id].bounding_box
+        assert vol_a_bbox[0] == pytest.approx((0.0, 0.0, 0.0), abs=1e-8)
+        assert vol_a_bbox[1] == pytest.approx((10.0, 10.0, 10.0), abs=1e-8)
+        assert vol_b_bbox[0] == pytest.approx((0.0, 5.0, 10.0), abs=1e-8)
+        assert vol_b_bbox[1] == pytest.approx((10.0, 15.0, 20.0), abs=1e-8)
+
+    def test_model_bounding_box_by_name_and_ids(self, dagmc_model_named_parts):
+        bbox_from_name = dagmc_model_named_parts.bounding_box("part_b")
+        bbox_from_ids = dagmc_model_named_parts.bounding_box(
+            dagmc_model_named_parts.material_to_volume_ids["part_a"]
+            + dagmc_model_named_parts.material_to_volume_ids["part_b"]
+        )
+        assert bbox_from_name[0] == pytest.approx((0.0, 5.0, 10.0), abs=1e-8)
+        assert bbox_from_name[1] == pytest.approx((10.0, 15.0, 20.0), abs=1e-8)
+        assert bbox_from_ids[0] == pytest.approx((0.0, 0.0, 0.0), abs=1e-8)
+        assert bbox_from_ids[1] == pytest.approx((10.0, 15.0, 20.0), abs=1e-8)
+
+    def test_model_bounding_box_errors(self, dagmc_model_named_parts):
+        with pytest.raises(KeyError):
+            dagmc_model_named_parts.bounding_box("missing_part")
+
+        with pytest.raises(ValueError):
+            dagmc_model_named_parts.bounding_box([999])
 
 
 class TestMOABModel:

@@ -13,6 +13,7 @@ import os
 import subprocess
 import tempfile
 import warnings
+from collections.abc import Iterable
 from functools import cached_property
 from typing import Final, Optional, Union
 
@@ -338,6 +339,42 @@ class DAGMCVolume(DAGMCEntitySet):
             )
             new_group.add(self)
 
+    @property
+    def bounding_box(
+        self,
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+        """Axis-aligned bounding box for this volume.
+
+        Returns:
+            Two 3-tuples giving the minimum and maximum XYZ coordinates:
+            ``((xmin, ymin, zmin), (xmax, ymax, zmax))``.
+
+        Raises:
+            ValueError: If no triangle vertices are found for this volume.
+        """
+        mins = []
+        maxs = []
+
+        for surface in self.adjacent_surfaces:
+            triangles = surface.triangles
+            if triangles.empty():
+                continue
+
+            vertices = np.unique(self.model._core.get_connectivity(triangles))
+            if vertices.size == 0:
+                continue
+
+            coords = self.model._core.get_coords(vertices).reshape(-1, 3)
+            mins.append(coords.min(axis=0))
+            maxs.append(coords.max(axis=0))
+
+        if not mins:
+            raise ValueError(f"Volume {self.global_id} has no triangle vertices.")
+
+        min_xyz = np.min(np.stack(mins), axis=0)
+        max_xyz = np.max(np.stack(maxs), axis=0)
+        return (tuple(min_xyz.tolist()), tuple(max_xyz.tolist()))
+
 
 class MOABModel:
     """MOAB Model.
@@ -528,6 +565,75 @@ class MOABModel:
 
 class DAGMCModel(MOABModel):
     """DAGMC Model."""
+
+    @property
+    def material_to_volume_ids(self) -> dict[str, list[int]]:
+        """Map material/part name to DAGMC volume global IDs.
+
+        This mapping is derived from DAGMC ``mat:<name>`` groups in the model.
+        The returned IDs correspond to OpenMC DAGMC cell IDs.
+
+        Returns:
+            Dictionary mapping material/part name (without ``mat:`` prefix) to
+            sorted list of volume ``GLOBAL_ID`` values.
+        """
+        mapping: dict[str, list[int]] = {}
+        for group in self.groups:
+            if not group.name.startswith("mat:"):
+                continue
+            mapping[group.name[4:]] = sorted(
+                volume.global_id for volume in group.volumes
+            )
+        return mapping
+
+    def bounding_box(
+        self, volume_ids_or_name: Union[str, Iterable[int]]
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+        """Get combined bounding box for selected DAGMC volumes.
+
+        Args:
+            volume_ids_or_name: Either a material/part name matching a
+                ``mat:<name>`` group, or an iterable of volume ``GLOBAL_ID``
+                values.
+
+        Returns:
+            Two 3-tuples giving the minimum and maximum XYZ coordinates:
+            ``((xmin, ymin, zmin), (xmax, ymax, zmax))``.
+
+        Raises:
+            KeyError: If ``volume_ids_or_name`` is a material name not found.
+            ValueError: If no matching volumes are found for provided IDs.
+        """
+        if isinstance(volume_ids_or_name, str):
+            if volume_ids_or_name not in self.material_to_volume_ids:
+                raise KeyError(f"Unknown material/part name: {volume_ids_or_name}")
+            volume_ids = set(self.material_to_volume_ids[volume_ids_or_name])
+        else:
+            volume_ids = set(volume_ids_or_name)
+            if not volume_ids:
+                raise ValueError("No volume IDs were provided.")
+        if isinstance(volume_ids_or_name, str) and not volume_ids:
+            raise ValueError(
+                f"Material/part '{volume_ids_or_name}' has no associated volumes."
+            )
+
+        selected_volumes = [v for v in self.volumes if v.global_id in volume_ids]
+        found_volume_ids = {v.global_id for v in selected_volumes}
+        missing_volume_ids = volume_ids - found_volume_ids
+        if missing_volume_ids:
+            missing_str = ", ".join(str(v) for v in sorted(missing_volume_ids))
+            raise ValueError(f"Unknown volume IDs: {missing_str}")
+
+        mins = []
+        maxs = []
+        for volume in selected_volumes:
+            min_xyz, max_xyz = volume.bounding_box
+            mins.append(np.array(min_xyz))
+            maxs.append(np.array(max_xyz))
+
+        combined_min = np.min(np.stack(mins), axis=0)
+        combined_max = np.max(np.stack(maxs), axis=0)
+        return (tuple(combined_min.tolist()), tuple(combined_max.tolist()))
 
     def create_group(self, group_name: str) -> DAGMCGroup:
         """Create new group.

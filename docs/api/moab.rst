@@ -13,6 +13,25 @@ Use the :py:meth:`write() <MOABModel.write>` method to write a ``.h5m`` file for
 
 See the `Surface Meshing <../notebooks/tutorials/surface_meshing.html#Run-an-OpenMC-Tally>`__ tutorial for a complete example.
 
+Named-part workflows
+--------------------
+
+For DAGMC models, volume IDs (``GLOBAL_ID``) can be queried by material/part name and used
+directly with OpenMC DAGMC cell filters:
+
+.. code-block:: python
+
+   id_map = dagmc_model.material_to_volume_ids
+   cell_ids = id_map["blanket_module"]
+   # openmc.CellFilter(cell_ids)
+
+You can also get tight axis-aligned bounds for one part or a set of volume IDs:
+
+.. code-block:: python
+
+   part_bounds = dagmc_model.bounding_box("blanket_module")
+   combined_bounds = dagmc_model.bounding_box(cell_ids)
+
 
 API
 ---------------------

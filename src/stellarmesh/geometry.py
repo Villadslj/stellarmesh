@@ -645,9 +645,7 @@ class Geometry:
             )
 
         if not all(s is not None for s in result_solids):
-            raise RuntimeError(
-                "Staged imprint failed: not all solids were processed."
-            )
+            raise RuntimeError("Staged imprint failed: not all solids were processed.")
         return type(self)(
             list(result_solids),  # type: ignore[arg-type]
             self.material_names,
@@ -703,8 +701,7 @@ class Geometry:
             result_solids[component[0]] = working_solids[component[0]]
         elif len(component) <= batch_size:
             logger.info(
-                f"Staged imprint: imprinting component of "
-                f"{len(component)} solids."
+                f"Staged imprint: imprinting component of {len(component)} solids."
             )
             imprinted = self._imprint_group_from(component, working_solids)
             for idx, solid in zip(component, imprinted, strict=True):
