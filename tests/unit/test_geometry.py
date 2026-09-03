@@ -114,6 +114,23 @@ class TestGeometryOperations:
         with pytest.raises(ValueError, match="batch_size must be at least 2"):
             geom_bd_layered_torus.imprint(batch_size=1)
 
+    def test_sweep_adjacency_matches_pairwise_reference(self):
+        bboxes = [
+            (0, 0, 0, 2, 2, 2),
+            (1, 1, 1, 3, 3, 3),
+            (4, 0, 0, 5, 1, 1),
+            (5, 1, 1, 6, 2, 2),
+            (-3, -3, -3, -2, -2, -2),
+        ]
+        expected = [set() for _ in bboxes]
+        for i in range(len(bboxes)):
+            for j in range(i + 1, len(bboxes)):
+                if sm.Geometry._bounding_boxes_overlap(bboxes[i], bboxes[j]):
+                    expected[i].add(j)
+                    expected[j].add(i)
+
+        assert sm.Geometry()._build_adjacency(len(bboxes), bboxes) == expected
+
 
 class TestMaterialNames:
     def test_get_material_names(self, model_bd_layered_torus):

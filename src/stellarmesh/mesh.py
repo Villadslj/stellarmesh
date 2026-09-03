@@ -23,8 +23,8 @@ import meshio
 import numpy as np
 
 from ._core import PathLike
-from .geometry import Geometry
 from ._progress import log_progress, progress_heartbeat
+from .geometry import Geometry
 
 try:
     import gmsh
@@ -520,7 +520,9 @@ class SurfaceMesh(Mesh):
         gmsh.model.mesh.generate(2)
 
     @classmethod
-    def _mesh_occ(cls, geometry: Geometry, options: OCCSurfaceOptions):
+    def _mesh_occ(  # noqa: PLR0915
+        cls, geometry: Geometry, options: OCCSurfaceOptions
+    ):
         assert gmsh.is_initialized()
         cmp = TopoDS_Compound()
         cmp_builder = TopoDS_Builder()
@@ -550,6 +552,7 @@ class SurfaceMesh(Mesh):
             logger,
             "OpenCascade surface meshing",
             options.progress_interval,
+            independent=True,
         ):
             BRepMesh_IncrementalMesh(theShape=cmp, theParameters=params)
         loc = TopLoc_Location()
@@ -608,9 +611,7 @@ class SurfaceMesh(Mesh):
             explorer.Next()
             processed_faces += 1
             if processed_faces % 1000 == 0:
-                logger.info(
-                    "Imported triangulation for %d OCC faces.", processed_faces
-                )
+                logger.info("Imported triangulation for %d OCC faces.", processed_faces)
         logger.info(
             "Imported triangulation for %d OCC faces in total.", processed_faces
         )
@@ -626,7 +627,7 @@ class SurfaceMesh(Mesh):
             return dim_tags
 
     @classmethod
-    def from_geometry(
+    def from_geometry(  # noqa: PLR0912
         cls, geometry: Geometry, options: GmshSurfaceOptions | OCCSurfaceOptions
     ) -> SurfaceMesh:
         """Mesh geometry.

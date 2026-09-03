@@ -20,8 +20,8 @@ from typing import Final, Optional, Union
 import numpy as np
 
 from ._core import PathLike
-from .mesh import Mesh
 from ._progress import log_progress, progress_heartbeat
+from .mesh import Mesh
 
 try:
     import gmsh
@@ -484,8 +484,6 @@ class MOABModel:
     def _add_nodes(self) -> dict[int, int]:
         """Generic node addition logic shared by all MOAB-based models."""
         node_tags, coords, _ = gmsh.model.mesh.get_nodes()
-        if len(node_tags) != len(np.unique(node_tags)):
-            raise ValueError("Duplicate node tags found.")
         if np.isnan(coords).any():
             raise ValueError("Mesh coordinates contain NaNs.")
         if np.isinf(coords).any():
@@ -494,7 +492,10 @@ class MOABModel:
         moab_vertices = self._core.create_vertices(coords)
         self._core.tag_set_data(self.id_tag, moab_vertices, node_tags.astype(np.int32))  # pyright: ignore[reportAttributeAccessIssue]
 
-        return dict(zip(node_tags, moab_vertices, strict=True))
+        node_tag_map = dict(zip(node_tags, moab_vertices, strict=True))
+        if len(node_tag_map) != len(node_tags):
+            raise ValueError("Duplicate node tags found.")
+        return node_tag_map
 
     def _create_elements(
         self, dim: int, tag: int, node_tag_map: dict[int, int]
@@ -533,7 +534,7 @@ class MOABModel:
             Initialized model.
         """
         with tempfile.NamedTemporaryFile(suffix=".vtk", delete=True) as mesh_file:
-            with mesh, progress_heartbeat(logger, "Converting mesh to MOAB"):
+            with progress_heartbeat(logger, "Converting mesh to MOAB"), mesh:
                 gmsh.write(mesh_file.name)
             return cls(mesh_file.name)
 
@@ -656,9 +657,7 @@ class DAGMCModel(MOABModel):
             if not volume_ids:
                 raise ValueError("No volume IDs were provided.")
         if isinstance(volume_ids_or_name, str) and not volume_ids:
-            raise ValueError(
-                f"Name '{volume_ids_or_name}' has no associated volumes."
-            )
+            raise ValueError(f"Name '{volume_ids_or_name}' has no associated volumes.")
 
         selected_volumes = [v for v in self.volumes if v.global_id in volume_ids]
         found_volume_ids = {v.global_id for v in selected_volumes}
@@ -846,7 +845,7 @@ class DAGMCModel(MOABModel):
         core = pymoab.core.Core()
         model = cls(core)
 
-        with mesh, progress_heartbeat(logger, "Converting mesh to DAGMC"):
+        with progress_heartbeat(logger, "Converting mesh to DAGMC"), mesh:
             if gmsh.model.mesh.get_elements(3)[1]:
                 logger.warning("Discarding volume elements from mesh.")
 

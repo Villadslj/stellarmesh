@@ -8,6 +8,7 @@ desc: Geometry class represents a CAD geometry to be meshed.
 
 from __future__ import annotations
 
+import heapq
 import logging
 import re
 import warnings
@@ -127,7 +128,7 @@ class Geometry:
     faces: list[TopoDS_Face]
     face_boundary_conditions: list[str]
 
-    def __init__(
+    def __init__(  # noqa: PLR0912
         self,
         solids: Optional[Sequence[Solid | TopoDS_Solid]] = None,
         material_names: Optional[Sequence[str]] = None,
@@ -324,7 +325,7 @@ class Geometry:
         return solids
 
     @classmethod
-    def _extract_step_metadata(
+    def _extract_step_metadata(  # noqa: PLR0915
         cls, filename: str, n_solids: int
     ) -> tuple[list[str], list[list[str]]]:
         """Extract part names and assembly memberships using the XDE framework.
@@ -344,7 +345,11 @@ class Geometry:
         doc = TDocStd_Document(TCollection_ExtendedString("XmlOcaf"))
         app.InitDocument(doc)
 
-        with progress_heartbeat(logger, f"Reading STEP metadata from {filename}"):
+        with progress_heartbeat(
+            logger,
+            f"Reading STEP metadata from {filename}",
+            independent=True,
+        ):
             caf_reader = STEPCAFControl_Reader()
             caf_reader.SetNameMode(True)  # noqa: FBT003
             read_status = caf_reader.ReadFile(filename)
@@ -472,7 +477,11 @@ class Geometry:
         """
         logger.info(f"Importing {filename}")
 
-        with progress_heartbeat(logger, f"Importing STEP geometry from {filename}"):
+        with progress_heartbeat(
+            logger,
+            f"Importing STEP geometry from {filename}",
+            independent=True,
+        ):
             reader = STEPControl_Reader()
             read_status = reader.ReadFile(filename)
             if read_status != IFSelect_RetDone:
@@ -633,7 +642,9 @@ class Geometry:
             bldr.AddArgument(solids[idx])
 
         with progress_heartbeat(
-            logger, f"Imprinting batch of {len(indices)} solids"
+            logger,
+            f"Imprinting batch of {len(indices)} solids",
+            independent=True,
         ):
             bldr.Perform()
         res = bldr.Shape()
@@ -688,7 +699,9 @@ class Geometry:
             bldr.AddArgument(solid)
 
         with progress_heartbeat(
-            logger, f"Imprinting {len(self.solids)} solids"
+            logger,
+            f"Imprinting {len(self.solids)} solids",
+            independent=True,
         ):
             bldr.Perform()
         res = bldr.Shape()
@@ -758,13 +771,31 @@ class Geometry:
         n: int,
         bboxes: list[tuple[float, float, float, float, float, float]],
     ) -> list[set[int]]:
-        """Build adjacency list based on AABB overlap."""
+        """Build AABB adjacency with a sweep along the x-axis."""
         adjacency: list[set[int]] = [set() for _ in range(n)]
-        for i in range(n):
-            for j in range(i + 1, n):
-                if self._bounding_boxes_overlap(bboxes[i], bboxes[j]):
-                    adjacency[i].add(j)
-                    adjacency[j].add(i)
+        sorted_indices = sorted(range(n), key=lambda index: bboxes[index][0])
+        active: set[int] = set()
+        expiry_heap: list[tuple[float, int]] = []
+
+        for processed, current in enumerate(sorted_indices, start=1):
+            current_xmin = bboxes[current][0]
+            while expiry_heap and expiry_heap[0][0] < current_xmin:
+                _, expired = heapq.heappop(expiry_heap)
+                active.discard(expired)
+
+            for candidate in active:
+                _, ymin1, zmin1, _, ymax1, zmax1 = bboxes[current]
+                _, ymin2, zmin2, _, ymax2, zmax2 = bboxes[candidate]
+                if not (
+                    ymax2 < ymin1 or ymax1 < ymin2 or zmax2 < zmin1 or zmax1 < zmin2
+                ):
+                    adjacency[current].add(candidate)
+                    adjacency[candidate].add(current)
+
+            active.add(current)
+            heapq.heappush(expiry_heap, (bboxes[current][3], current))
+            log_progress(logger, "Building solid overlap graph", processed, n)
+
         return adjacency
 
     @staticmethod
