@@ -9,6 +9,7 @@ desc: Geometry class represents a CAD geometry to be meshed.
 from __future__ import annotations
 
 import logging
+import re
 import warnings
 from collections import deque
 from typing import (
@@ -120,6 +121,7 @@ class Geometry:
 
     solids: list[TopoDS_Solid]
     material_names: list[str]
+    assembly_names: list[list[str]]
     faces: list[TopoDS_Face]
     face_boundary_conditions: list[str]
 
@@ -129,6 +131,7 @@ class Geometry:
         material_names: Optional[Sequence[str]] = None,
         surfaces: Optional[Sequence[Face | Shell | TopoDS_Face | TopoDS_Shell]] = None,
         surface_boundary_conditions: Optional[Sequence[str]] = None,
+        assembly_names: Optional[Sequence[Sequence[str]]] = None,
     ):
         """Construct geometry from solids.
 
@@ -140,6 +143,8 @@ class Geometry:
             Face or Shell, or an OCP TopoDS_Face or TopoDS_Shell.
             surface_boundary_conditions: List of boundary condition names. Must match
             length of surfaces.
+            assembly_names: Assembly names containing each solid. Must match the
+                length of solids. Each solid may belong to multiple nested assemblies.
         """
         if (solids and not material_names) or (material_names and not solids):
             raise ValueError(
@@ -157,7 +162,13 @@ class Geometry:
 
         self.solids = []
         self.material_names = []
+        self.assembly_names = []
         if solids and material_names:
+            if assembly_names is not None and len(assembly_names) != len(solids):
+                raise ValueError(
+                    f"Length of assembly_names ({len(assembly_names)}) does not match "
+                    f"number of solids ({len(solids)})."
+                )
             for i, (s, mat_name) in enumerate(zip(solids, material_names, strict=True)):
                 s_wrapped = (
                     s if isinstance(s, TopoDS_Shape) else getattr(s, "wrapped", None)
@@ -175,6 +186,13 @@ class Geometry:
 
                 self.solids.append(s_wrapped)
                 self.material_names.append(mat_name)
+                names = assembly_names[i] if assembly_names is not None else ()
+                if isinstance(names, str):
+                    raise TypeError(
+                        "Each assembly_names entry must be a sequence of names, "
+                        "not a string."
+                    )
+                self.assembly_names.append(list(dict.fromkeys(names)))
 
         self.faces = []
         self.face_boundary_conditions = []
@@ -231,6 +249,27 @@ class Geometry:
             )
         self.material_names = list(material_names)
 
+    def get_assembly_names(self) -> list[list[str]]:
+        """Return assembly memberships for each solid."""
+        return [list(names) for names in self.assembly_names]
+
+    def set_assembly_names(self, assembly_names: Sequence[Sequence[str]]) -> None:
+        """Set assembly memberships for each solid."""
+        if len(assembly_names) != len(self.solids):
+            raise ValueError(
+                f"Length of assembly_names ({len(assembly_names)}) does not match "
+                f"number of solids ({len(self.solids)})."
+            )
+        normalized_names = []
+        for names in assembly_names:
+            if isinstance(names, str):
+                raise TypeError(
+                    "Each assembly_names entry must be a sequence of names, "
+                    "not a string."
+                )
+            normalized_names.append(list(dict.fromkeys(names)))
+        self.assembly_names = normalized_names
+
     @staticmethod
     @overload
     def _get_child_shapes(
@@ -277,14 +316,16 @@ class Geometry:
         """Return all the solids in this shape."""
         solids: list[TopoDS_Solid] = []
         if shape.ShapeType() == TopAbs_ShapeEnum.TopAbs_SOLID:
-            solids.append(TopoDS.Solid_s(shape))
+            solids.append(_get_ocp_method(TopoDS, "Solid")(shape))
         elif shape.ShapeType() == TopAbs_ShapeEnum.TopAbs_COMPOUND:
             solids = cls._get_child_shapes(shape, TopoDS_Solid)
         return solids
 
     @classmethod
-    def _extract_step_part_names(cls, filename: str, n_solids: int) -> list[str]:
-        """Extract part names from a STEP file using the XDE framework.
+    def _extract_step_metadata(
+        cls, filename: str, n_solids: int
+    ) -> tuple[list[str], list[list[str]]]:
+        """Extract part names and assembly memberships using the XDE framework.
 
         Reads the STEP file with XDE (Extended Data Framework) to access the
         assembly structure and extract the name associated with each solid.
@@ -294,7 +335,7 @@ class Geometry:
             n_solids: Expected number of solids (for validation).
 
         Returns:
-            List of part name strings, one per solid.
+            Part names and assembly memberships, one entry per solid.
         """
         app = _get_ocp_method(XCAFApp_Application, "GetApplication")()
         # "XmlOcaf" is the standard XDE document format for OCAF applications.
@@ -323,6 +364,7 @@ class Geometry:
         labels = TDF_LabelSequence()
         shape_tool.GetFreeShapes(labels)
         names: list[str] = []
+        assembly_names: list[list[str]] = []
 
         def _get_label_name(label: TDF_Label) -> str:
             """Get the name attribute from a label, or empty string."""
@@ -334,14 +376,31 @@ class Geometry:
                 return _ocp_string_to_str(name_str) if name_str else ""
             return ""
 
-        def _collect_names_from_label(label: TDF_Label) -> None:
-            """Recursively collect names for solid shapes from label tree."""
+        def _normalize_assembly_name(name: str) -> str:
+            """Remove Onshape's per-instance suffix, e.g. `` <4>``."""
+            return re.sub(r"\s*<\d+>$", "", name).strip()
+
+        def _collect_names_from_label(
+            label: TDF_Label,
+            parent_assemblies: Sequence[str],
+            instance_name: str = "",
+        ) -> None:
+            """Recursively collect solid metadata from the assembly tree."""
             shape = _get_ocp_method(shape_tool, "GetShape")(label)
             if shape is None or shape.IsNull():
                 return
 
+            assemblies = list(parent_assemblies)
+            if _get_ocp_method(shape_tool, "IsAssembly")(label):
+                assembly_name = _normalize_assembly_name(
+                    instance_name or _get_label_name(label)
+                )
+                if assembly_name and assembly_name not in assemblies:
+                    assemblies.append(assembly_name)
+
             if shape.ShapeType() == TopAbs_SOLID:
-                names.append(_get_label_name(label))
+                names.append(_get_label_name(label) or instance_name)
+                assembly_names.append(assemblies)
             elif shape.ShapeType() in (
                 TopAbs_ShapeEnum.TopAbs_COMPOUND,
                 TopAbs_ShapeEnum.TopAbs_COMPSOLID,
@@ -355,13 +414,17 @@ class Geometry:
                     if _get_ocp_method(shape_tool, "GetReferredShape")(
                         sub_label, ref_label
                     ):
-                        _collect_names_from_label(ref_label)
+                        _collect_names_from_label(
+                            ref_label,
+                            assemblies,
+                            _get_label_name(sub_label),
+                        )
                     else:
-                        _collect_names_from_label(sub_label)
+                        _collect_names_from_label(sub_label, assemblies)
 
         for i in range(labels.Length()):
             label = labels.Value(i + 1)
-            _collect_names_from_label(label)
+            _collect_names_from_label(label, ())
 
         if len(names) != n_solids:
             logger.warning(
@@ -369,9 +432,16 @@ class Geometry:
                 f"number of solids ({n_solids}). Using generic names."
             )
             names = [f"solid_{i}" for i in range(n_solids)]
+            assembly_names = [[] for _ in range(n_solids)]
 
         logger.info(f"Extracted material names from STEP file: {names}")
-        return names
+        logger.info(f"Extracted assembly names from STEP file: {assembly_names}")
+        return names, assembly_names
+
+    @classmethod
+    def _extract_step_part_names(cls, filename: str, n_solids: int) -> list[str]:
+        """Extract part names from a STEP file using the XDE framework."""
+        return cls._extract_step_metadata(filename, n_solids)[0]
 
     # TODO(akoen): from_step and from_brep are not DRY
     # https://github.com/Thea-Energy/stellarmesh/issues/2
@@ -380,6 +450,7 @@ class Geometry:
         cls,
         filename: str,
         material_names: Optional[Sequence[str]] = None,
+        assembly_names: Optional[Sequence[Sequence[str]]] = None,
     ) -> Geometry:
         """Import model from a step file.
 
@@ -390,6 +461,8 @@ class Geometry:
             filename: File path to import.
             material_names: Ordered list of material names matching solids in file.
                 If None, material names are extracted from STEP part names.
+            assembly_names: Assembly memberships matching solids in file. If None,
+                names are extracted from the STEP assembly hierarchy.
 
         Returns:
             Model.
@@ -408,22 +481,30 @@ class Geometry:
             shape = reader.Shape(i + 1)
             solids.extend(cls._get_solids_from_shape(shape))
 
-        if material_names is None:
-            material_names = cls._extract_step_part_names(filename, len(solids))
+        if material_names is None or assembly_names is None:
+            extracted_materials, extracted_assemblies = cls._extract_step_metadata(
+                filename, len(solids)
+            )
+            if material_names is None:
+                material_names = extracted_materials
+            if assembly_names is None:
+                assembly_names = extracted_assemblies
 
-        return cls(solids, material_names)
+        return cls(solids, material_names, assembly_names=assembly_names)
 
     @classmethod
     def import_step(
         cls,
         filename: str,
         material_names: Optional[Sequence[str]] = None,
+        assembly_names: Optional[Sequence[Sequence[str]]] = None,
     ) -> Geometry:
         """Import model from a step file.
 
         Args:
             filename: File path to import.
             material_names: Ordered list of material names matching solids in file.
+            assembly_names: Assembly memberships matching solids in file.
 
         Returns:
             Model.
@@ -433,7 +514,7 @@ class Geometry:
             FutureWarning,
             stacklevel=2,
         )
-        return cls.from_step(filename, material_names)
+        return cls.from_step(filename, material_names, assembly_names)
 
     @classmethod
     def from_brep(
@@ -606,7 +687,11 @@ class Geometry:
                 f"Length of imprinted solids {l0} != length of original solids {l1}"
             )
 
-        return type(self)(res_solids, self.material_names)
+        return type(self)(
+            res_solids,
+            self.material_names,
+            assembly_names=self.assembly_names,
+        )
 
     def _imprint_staged(self, batch_size: int) -> Geometry:
         """Imprint solids in stages to reduce peak memory usage.
@@ -649,6 +734,7 @@ class Geometry:
         return type(self)(
             list(result_solids),  # type: ignore[arg-type]
             self.material_names,
+            assembly_names=self.assembly_names,
         )
 
     def _build_adjacency(

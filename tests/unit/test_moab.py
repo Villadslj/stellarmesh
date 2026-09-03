@@ -17,7 +17,11 @@ def dagmc_model():
 def dagmc_model_named_parts():
     box1 = bd.Solid.make_box(10.0, 10.0, 10.0)
     box2 = box1.transformed(offset=(0.0, 5.0, 10.0))
-    geom = sm.Geometry([box1, box2], ["part_a", "part_b"])
+    geom = sm.Geometry(
+        [box1, box2],
+        ["part_a", "part_b"],
+        assembly_names=[["assembly"], ["assembly", "subassembly"]],
+    )
     mesh = sm.SurfaceMesh.from_geometry(geom, sm.GmshSurfaceOptions(max_mesh_size=5))
     return sm.DAGMCModel.from_mesh(mesh)
 
@@ -121,6 +125,18 @@ class TestDAGMCModel:
             vol.global_id for vol in dagmc_model_named_parts.volumes
         }
 
+    def test_assembly_to_volume_ids(self, dagmc_model_named_parts):
+        mapping = dagmc_model_named_parts.assembly_to_volume_ids
+        assert set(mapping["assembly"]) == {
+            vol.global_id for vol in dagmc_model_named_parts.volumes
+        }
+        assert mapping["subassembly"] == [
+            dagmc_model_named_parts.material_to_volume_ids["part_b"][0]
+        ]
+        assert dagmc_model_named_parts.name_to_volume_ids["assembly"] == mapping[
+            "assembly"
+        ]
+
     def test_volume_bounding_box(self, dagmc_model_named_parts):
         volumes_by_id = {v.global_id: v for v in dagmc_model_named_parts.volumes}
         part_a_id = dagmc_model_named_parts.material_to_volume_ids["part_a"][0]
@@ -134,12 +150,15 @@ class TestDAGMCModel:
 
     def test_model_bounding_box_by_name_and_ids(self, dagmc_model_named_parts):
         bbox_from_name = dagmc_model_named_parts.bounding_box("part_b")
+        bbox_from_assembly = dagmc_model_named_parts.bounding_box("assembly")
         bbox_from_ids = dagmc_model_named_parts.bounding_box(
             dagmc_model_named_parts.material_to_volume_ids["part_a"]
             + dagmc_model_named_parts.material_to_volume_ids["part_b"]
         )
         assert bbox_from_name[0] == pytest.approx((0.0, 5.0, 10.0), abs=1e-8)
         assert bbox_from_name[1] == pytest.approx((10.0, 15.0, 20.0), abs=1e-8)
+        assert bbox_from_assembly[0] == pytest.approx((0.0, 0.0, 0.0), abs=1e-8)
+        assert bbox_from_assembly[1] == pytest.approx((10.0, 15.0, 20.0), abs=1e-8)
         assert bbox_from_ids[0] == pytest.approx((0.0, 0.0, 0.0), abs=1e-8)
         assert bbox_from_ids[1] == pytest.approx((10.0, 15.0, 20.0), abs=1e-8)
 

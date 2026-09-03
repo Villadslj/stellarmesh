@@ -58,6 +58,26 @@ class TestGeometryImportExport:
         geom = sm.Geometry.from_step("named.step")
 
         assert geom.material_names == ["ss", "fs"]
+        assert geom.assembly_names == [["top"], ["top"]]
+
+    def test_step_import_nested_assembly_names(self):
+        subassembly = cq.Assembly(name="Cylinder sub")
+        subassembly.add(cq.Workplane().box(1, 1, 1), name="ss - Pin")
+        subassembly.add(
+            cq.Workplane().translate((2, 0, 0)).box(1, 1, 1),
+            name="ss - Rod",
+        )
+        assembly = cq.Assembly(name="Engine")
+        assembly.add(subassembly, name="Cylinder sub <1>")
+        assembly.save("nested.step")
+
+        geom = sm.Geometry.from_step("nested.step")
+
+        assert geom.material_names == ["ss - Pin", "ss - Rod"]
+        assert geom.assembly_names == [
+            ["Engine", "Cylinder sub"],
+            ["Engine", "Cylinder sub"],
+        ]
 
     def test_brep_import_compound(self, model_bd_layered_torus):
         cmp = bd.Compound(model_bd_layered_torus)
@@ -76,9 +96,13 @@ class TestGeometryOperations:
         geom_bd_layered_torus.imprint()
 
     def test_geometry_imprint_staged(self, geom_bd_layered_torus):
+        geom_bd_layered_torus.set_assembly_names(
+            [["assembly"]] * len(geom_bd_layered_torus.solids)
+        )
         result = geom_bd_layered_torus.imprint(batch_size=2)
         assert len(result.solids) == len(geom_bd_layered_torus.solids)
         assert result.material_names == geom_bd_layered_torus.material_names
+        assert result.assembly_names == geom_bd_layered_torus.assembly_names
 
     def test_geometry_imprint_staged_batch_size_equals_solids(
         self, geom_bd_layered_torus
@@ -116,3 +140,23 @@ class TestMaterialNames:
         geom = sm.Geometry(model_bd_layered_torus, material_names=material_names)
         with pytest.raises(ValueError, match="does not match"):
             geom.set_material_names(["only_one"])
+
+
+class TestAssemblyNames:
+    def test_get_assembly_names_returns_deep_copy(self, model_bd_layered_torus):
+        geom = sm.Geometry(
+            model_bd_layered_torus,
+            material_names=["material"] * len(model_bd_layered_torus),
+            assembly_names=[["assembly"]] * len(model_bd_layered_torus),
+        )
+        result = geom.get_assembly_names()
+        result[0][0] = "modified"
+        assert geom.assembly_names[0] == ["assembly"]
+
+    def test_set_assembly_names_wrong_length(self, model_bd_layered_torus):
+        geom = sm.Geometry(
+            model_bd_layered_torus,
+            material_names=["material"] * len(model_bd_layered_torus),
+        )
+        with pytest.raises(ValueError, match="does not match"):
+            geom.set_assembly_names([["only_one"]])

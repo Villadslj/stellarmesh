@@ -586,35 +586,77 @@ class DAGMCModel(MOABModel):
             )
         return mapping
 
+    @property
+    def assembly_to_volume_ids(self) -> dict[str, list[int]]:
+        """Map assembly name to contained DAGMC volume global IDs."""
+        mapping: dict[str, list[int]] = {}
+        for group in self.groups:
+            if not group.name.startswith("assembly:"):
+                continue
+            mapping[group.name[9:]] = sorted(
+                volume.global_id for volume in group.volumes
+            )
+        return mapping
+
+    @property
+    def name_to_volume_ids(self) -> dict[str, list[int]]:
+        """Map any part/material or assembly name to DAGMC volume IDs."""
+        mapping = {
+            name: list(volume_ids)
+            for name, volume_ids in self.material_to_volume_ids.items()
+        }
+        for name, volume_ids in self.assembly_to_volume_ids.items():
+            if name in mapping and mapping[name] != volume_ids:
+                raise ValueError(
+                    f"Name {name!r} is used by both a part/material and an assembly. "
+                    "Use material_to_volume_ids or assembly_to_volume_ids explicitly."
+                )
+            mapping[name] = list(volume_ids)
+        return mapping
+
+    def volume_ids(self, name: str) -> list[int]:
+        """Return volume IDs for a part/material or assembly name."""
+        material_ids = self.material_to_volume_ids.get(name)
+        assembly_ids = self.assembly_to_volume_ids.get(name)
+        if material_ids is not None and assembly_ids is not None:
+            if material_ids != assembly_ids:
+                raise ValueError(
+                    f"Name {name!r} is used by both a part/material and an assembly. "
+                    "Use the explicit mapping property to disambiguate it."
+                )
+            return list(material_ids)
+        if material_ids is not None:
+            return list(material_ids)
+        if assembly_ids is not None:
+            return list(assembly_ids)
+        raise KeyError(f"Unknown material, part, or assembly name: {name}")
+
     def bounding_box(
         self, volume_ids_or_name: Union[str, Iterable[int]]
     ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
         """Get combined bounding box for selected DAGMC volumes.
 
         Args:
-            volume_ids_or_name: Either a material/part name matching a
-                ``mat:<name>`` group, or an iterable of volume ``GLOBAL_ID``
-                values.
+            volume_ids_or_name: A material/part name, an assembly name, or an
+                iterable of volume ``GLOBAL_ID`` values.
 
         Returns:
             Two 3-tuples giving the minimum and maximum XYZ coordinates:
             ``((xmin, ymin, zmin), (xmax, ymax, zmax))``.
 
         Raises:
-            KeyError: If ``volume_ids_or_name`` is a material name not found.
+            KeyError: If ``volume_ids_or_name`` is a name not found.
             ValueError: If no matching volumes are found for provided IDs.
         """
         if isinstance(volume_ids_or_name, str):
-            if volume_ids_or_name not in self.material_to_volume_ids:
-                raise KeyError(f"Unknown material/part name: {volume_ids_or_name}")
-            volume_ids = set(self.material_to_volume_ids[volume_ids_or_name])
+            volume_ids = set(self.volume_ids(volume_ids_or_name))
         else:
             volume_ids = set(volume_ids_or_name)
             if not volume_ids:
                 raise ValueError("No volume IDs were provided.")
         if isinstance(volume_ids_or_name, str) and not volume_ids:
             raise ValueError(
-                f"Material/part '{volume_ids_or_name}' has no associated volumes."
+                f"Name '{volume_ids_or_name}' has no associated volumes."
             )
 
         selected_volumes = [v for v in self.volumes if v.global_id in volume_ids]
@@ -884,6 +926,24 @@ class DAGMCModel(MOABModel):
             volume_map[volume_tag] = volume_set
             mat_name = mesh.entity_metadata(3, volume_tag).material
             volume_set.material = mat_name
+
+        next_group_id = max((g.global_id for g in self.groups), default=0) + 1
+        for dim, physical_tag in gmsh.model.get_physical_groups(3):
+            group_name = gmsh.model.get_physical_name(dim, physical_tag)
+            if not group_name.startswith("assembly:"):
+                continue
+            if len(group_name.encode()) > pymoab.types.NAME_TAG_SIZE:
+                raise ValueError(
+                    f"DAGMC assembly group name {group_name!r} exceeds the "
+                    f"{pymoab.types.NAME_TAG_SIZE}-byte MOAB NAME tag limit."
+                )
+            group = self.create_group(group_name)
+            group.global_id = next_group_id
+            next_group_id += 1
+            for volume_tag in gmsh.model.get_entities_for_physical_group(
+                dim, physical_tag
+            ):
+                group.add(volume_map[volume_tag])
 
         for surface_tag, surface in surface_map.items():
             metadata = mesh.entity_metadata(2, surface_tag)

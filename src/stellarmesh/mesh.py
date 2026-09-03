@@ -233,7 +233,13 @@ class EntityMetadata:
             )
             for pg in physical_groups:
                 entities = gmsh.model.get_entities_for_physical_group(self._dim, pg)
-                if len(entities) == 1 and entities[0] == self._tag:
+                group_name = gmsh.model.get_physical_name(self._dim, pg)
+                group_data = parse_qs(group_name)
+                if (
+                    len(entities) == 1
+                    and entities[0] == self._tag
+                    and group_data.get("tag") == [str(self._tag)]
+                ):
                     return pg
             if not create_if_missing:
                 raise RuntimeError(
@@ -613,7 +619,18 @@ class SurfaceMesh(Mesh):
             gmsh.model.add("stellarmesh_model")
 
             # Solids
-            for s, m in zip(geometry.solids, geometry.material_names, strict=True):
+            assembly_tags: dict[str, list[int]] = {}
+            assembly_names = getattr(
+                geometry,
+                "assembly_names",
+                [[] for _ in geometry.solids],
+            )
+            for s, m, assemblies in zip(
+                geometry.solids,
+                geometry.material_names,
+                assembly_names,
+                strict=True,
+            ):
                 dim_tags = cls._import_occ(s)
                 gmsh.model.occ.synchronize()
                 if dim_tags[0][0] != 3:
@@ -621,6 +638,15 @@ class SurfaceMesh(Mesh):
 
                 solid_tag = dim_tags[0][1]
                 mesh.entity_metadata(3, solid_tag).material = m
+                for assembly_name in assemblies:
+                    assembly_tags.setdefault(assembly_name, []).append(solid_tag)
+
+            for assembly_name, solid_tags in assembly_tags.items():
+                gmsh.model.add_physical_group(
+                    3,
+                    solid_tags,
+                    name=f"assembly:{assembly_name}",
+                )
 
             # Faces
             for f, bc in zip(
