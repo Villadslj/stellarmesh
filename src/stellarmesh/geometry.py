@@ -21,6 +21,8 @@ from typing import (
     overload,
 )
 
+from ._progress import log_progress, progress_heartbeat
+
 try:
     from OCP.Bnd import Bnd_Box  # pyright: ignore[reportMissingModuleSource]
     from OCP.BOPAlgo import (  # pyright: ignore[reportMissingModuleSource]
@@ -342,12 +344,13 @@ class Geometry:
         doc = TDocStd_Document(TCollection_ExtendedString("XmlOcaf"))
         app.InitDocument(doc)
 
-        caf_reader = STEPCAFControl_Reader()
-        caf_reader.SetNameMode(True)  # noqa: FBT003
-        read_status = caf_reader.ReadFile(filename)
-        if read_status != IFSelect_RetDone:
-            raise ValueError(f"STEP File {filename} could not be loaded")
-        caf_reader.Transfer(doc)
+        with progress_heartbeat(logger, f"Reading STEP metadata from {filename}"):
+            caf_reader = STEPCAFControl_Reader()
+            caf_reader.SetNameMode(True)  # noqa: FBT003
+            read_status = caf_reader.ReadFile(filename)
+            if read_status != IFSelect_RetDone:
+                raise ValueError(f"STEP File {filename} could not be loaded")
+            caf_reader.Transfer(doc)
 
         _get_shape_tool = (
             getattr(XCAFDoc_DocumentTool, "ShapeTool_s", None)
@@ -469,12 +472,15 @@ class Geometry:
         """
         logger.info(f"Importing {filename}")
 
-        reader = STEPControl_Reader()
-        read_status = reader.ReadFile(filename)
-        if read_status != IFSelect_RetDone:
-            raise ValueError(f"STEP File {filename} could not be loaded")
-        for i in range(reader.NbRootsForTransfer()):
-            reader.TransferRoot(i + 1)
+        with progress_heartbeat(logger, f"Importing STEP geometry from {filename}"):
+            reader = STEPControl_Reader()
+            read_status = reader.ReadFile(filename)
+            if read_status != IFSelect_RetDone:
+                raise ValueError(f"STEP File {filename} could not be loaded")
+            n_roots = reader.NbRootsForTransfer()
+            for i in range(n_roots):
+                reader.TransferRoot(i + 1)
+                log_progress(logger, "Transferring STEP roots", i + 1, n_roots)
 
         solids = []
         for i in range(reader.NbShapes()):
@@ -626,7 +632,10 @@ class Geometry:
         for idx in indices:
             bldr.AddArgument(solids[idx])
 
-        bldr.Perform()
+        with progress_heartbeat(
+            logger, f"Imprinting batch of {len(indices)} solids"
+        ):
+            bldr.Perform()
         res = bldr.Shape()
         res_solids = Geometry._get_solids_from_shape(res)
 
@@ -678,7 +687,10 @@ class Geometry:
         for solid in self.solids:
             bldr.AddArgument(solid)
 
-        bldr.Perform()
+        with progress_heartbeat(
+            logger, f"Imprinting {len(self.solids)} solids"
+        ):
+            bldr.Perform()
         res = bldr.Shape()
         res_solids = self._get_solids_from_shape(res)
 
@@ -709,7 +721,10 @@ class Geometry:
 
         # Compute bounding boxes.
         logger.info(f"Staged imprint: computing bounding boxes for {n} solids.")
-        bboxes = [self._get_bounding_box(s) for s in self.solids]
+        bboxes = []
+        for i, solid in enumerate(self.solids, start=1):
+            bboxes.append(self._get_bounding_box(solid))
+            log_progress(logger, "Computing solid bounding boxes", i, n)
 
         # Build adjacency and find connected components.
         adjacency = self._build_adjacency(n, bboxes)
@@ -724,10 +739,11 @@ class Geometry:
         result_solids: list[Optional[TopoDS_Solid]] = [None] * n
         # Work on a copy to avoid mutating self.solids during batch processing.
         working_solids = list(self.solids)
-        for component in components:
+        for i, component in enumerate(components, start=1):
             self._imprint_component(
                 component, batch_size, adjacency, result_solids, working_solids
             )
+            log_progress(logger, "Imprinting connected components", i, len(components))
 
         if not all(s is not None for s in result_solids):
             raise RuntimeError("Staged imprint failed: not all solids were processed.")

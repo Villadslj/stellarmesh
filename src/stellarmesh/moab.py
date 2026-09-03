@@ -21,6 +21,7 @@ import numpy as np
 
 from ._core import PathLike
 from .mesh import Mesh
+from ._progress import log_progress, progress_heartbeat
 
 try:
     import gmsh
@@ -532,7 +533,7 @@ class MOABModel:
             Initialized model.
         """
         with tempfile.NamedTemporaryFile(suffix=".vtk", delete=True) as mesh_file:
-            with mesh:
+            with mesh, progress_heartbeat(logger, "Converting mesh to MOAB"):
                 gmsh.write(mesh_file.name)
             return cls(mesh_file.name)
 
@@ -845,7 +846,7 @@ class DAGMCModel(MOABModel):
         core = pymoab.core.Core()
         model = cls(core)
 
-        with mesh:
+        with mesh, progress_heartbeat(logger, "Converting mesh to DAGMC"):
             if gmsh.model.mesh.get_elements(3)[1]:
                 logger.warning("Discarding volume elements from mesh.")
 
@@ -870,7 +871,7 @@ class DAGMCModel(MOABModel):
         surface_tags = [s[1] for s in surface_dimtags]
         logger.debug(f"Mesh has {len(surface_tags)} surfaces")
 
-        for surface_tag in surface_tags:
+        for i, surface_tag in enumerate(surface_tags, start=1):
             surface_set = self.create_surface(surface_tag)
             surface_map[surface_tag] = surface_set
 
@@ -881,6 +882,7 @@ class DAGMCModel(MOABModel):
 
             self._create_surface_elements(surface_tag, surface_set, node_tag_map)
             self._create_volume_friend_for_lonely_surfaces(surface_tag, surface_set)
+            log_progress(logger, "Creating DAGMC surfaces", i, len(surface_tags))
 
         return surface_map
 
@@ -921,11 +923,12 @@ class DAGMCModel(MOABModel):
         volume_map: dict[int, DAGMCVolume] = {}
         logger.debug(f"Mesh has {len(volume_tags)} volumes")
 
-        for volume_tag in volume_tags:
+        for i, volume_tag in enumerate(volume_tags, start=1):
             volume_set = self.create_volume(volume_tag)
             volume_map[volume_tag] = volume_set
             mat_name = mesh.entity_metadata(3, volume_tag).material
             volume_set.material = mat_name
+            log_progress(logger, "Creating DAGMC volumes", i, len(volume_tags))
 
         next_group_id = max((g.global_id for g in self.groups), default=0) + 1
         for dim, physical_tag in gmsh.model.get_physical_groups(3):

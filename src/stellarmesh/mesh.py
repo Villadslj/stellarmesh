@@ -24,6 +24,7 @@ import numpy as np
 
 from ._core import PathLike
 from .geometry import Geometry
+from ._progress import log_progress, progress_heartbeat
 
 try:
     import gmsh
@@ -169,6 +170,8 @@ class OCCSurfaceOptions:
         min_mesh_size: Minimum mesh size. Defaults to None.
         relative: Whether to use relative tolerances. Defaults to False.
         parallel: Whether to use parallel meshing. Defaults to True.
+        progress_interval: Seconds between elapsed-time messages during blocking
+            OpenCascade operations. Set to 0 to disable.
     """
 
     tol_angular_deg: Optional[float] = 0.5
@@ -177,6 +180,7 @@ class OCCSurfaceOptions:
     algorithm: OCCSurfaceAlgo = OCCSurfaceAlgo.WATSON
     relative: bool = False
     parallel: bool = True
+    progress_interval: float = 60.0
 
     def _build_params(self) -> IMeshTools_Parameters:
         """Build IMeshTools Parameters struct from values."""
@@ -525,7 +529,8 @@ class SurfaceMesh(Mesh):
         tolerance_tool = ShapeFix_ShapeTolerance()
         params = options._build_params()
         # These operations must be completed before IncrementalMesh is initialized
-        for shape in geometry.solids + geometry.faces:
+        shapes = geometry.solids + geometry.faces
+        for i, shape in enumerate(shapes, start=1):
             explorer = TopExp_Explorer(shape, TopAbs_FACE)
             while explorer.More():
                 face = TopoDS.Face_s(explorer.Current())
@@ -537,13 +542,20 @@ class SurfaceMesh(Mesh):
                 explorer.Next()
 
             cmp_builder.Add(cmp, shape)
+            log_progress(logger, "Preparing OCC shapes", i, len(shapes))
 
         # NOTE: Gmsh import logic is at
         # https://github.com/live-clones/gmsh/blob/a20dc70a8bb9115185dd6a3b519f6bb3a1aec261/src/geo/GModelIO_OCC.cpp#L715
-        BRepMesh_IncrementalMesh(theShape=cmp, theParameters=params)
+        with progress_heartbeat(
+            logger,
+            "OpenCascade surface meshing",
+            options.progress_interval,
+        ):
+            BRepMesh_IncrementalMesh(theShape=cmp, theParameters=params)
         loc = TopLoc_Location()
         known_surface_tags = []
         explorer = TopExp_Explorer(cmp, TopAbs_FACE)
+        processed_faces = 0
         while explorer.More():
             face = TopoDS.Face_s(explorer.Current())
 
@@ -594,6 +606,14 @@ class SurfaceMesh(Mesh):
             )
 
             explorer.Next()
+            processed_faces += 1
+            if processed_faces % 1000 == 0:
+                logger.info(
+                    "Imported triangulation for %d OCC faces.", processed_faces
+                )
+        logger.info(
+            "Imported triangulation for %d OCC faces in total.", processed_faces
+        )
 
     @staticmethod
     def _import_occ(shape: TopoDS_Shape, *, native: bool = True) -> list[tuple]:
@@ -625,11 +645,15 @@ class SurfaceMesh(Mesh):
                 "assembly_names",
                 [[] for _ in geometry.solids],
             )
-            for s, m, assemblies in zip(
-                geometry.solids,
-                geometry.material_names,
-                assembly_names,
-                strict=True,
+            n_solids = len(geometry.solids)
+            for i, (s, m, assemblies) in enumerate(
+                zip(
+                    geometry.solids,
+                    geometry.material_names,
+                    assembly_names,
+                    strict=True,
+                ),
+                start=1,
             ):
                 dim_tags = cls._import_occ(s)
                 gmsh.model.occ.synchronize()
@@ -640,6 +664,7 @@ class SurfaceMesh(Mesh):
                 mesh.entity_metadata(3, solid_tag).material = m
                 for assembly_name in assemblies:
                     assembly_tags.setdefault(assembly_name, []).append(solid_tag)
+                log_progress(logger, "Importing OCC solids into Gmsh", i, n_solids)
 
             for assembly_name, solid_tags in assembly_tags.items():
                 gmsh.model.add_physical_group(

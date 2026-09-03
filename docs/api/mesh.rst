@@ -29,6 +29,30 @@ Specifying Mesh Options
 
 The :py:meth:`SurfaceMesh.from_geometry` constructor takes either an :py:class:`OCCSurfaceOptions` or :py:class:`GmshSurfaceOptions` options class as a parameter. Use this parameter to select the meshing backend and specify meshing options.
 
+Progress logging
+----------------
+
+Stellarmesh logs phase progress at ``INFO`` level. Long blocking OpenCascade
+operations emit an elapsed-time heartbeat every 60 seconds:
+
+.. code-block:: python
+
+    import logging
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    options = stellarmesh.OCCSurfaceOptions(
+        tol_linear=1.0,
+        progress_interval=30.0,
+    )
+
+Set ``progress_interval=0`` to disable OCC meshing heartbeats. The default interval
+for other long operations can be changed with the
+``STELLARMESH_PROGRESS_INTERVAL`` environment variable.
+
 .. autofunction:: stellarmesh.SurfaceMesh.from_geometry
    :no-index:
 
