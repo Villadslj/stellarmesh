@@ -43,7 +43,22 @@ except ImportError as e:
 
 logger = logging.getLogger(__name__)
 
-DAGMC_NAME_TAG_SIZE = 128
+#: DAGMC hard-codes the MOAB ``NAME`` tag to :data:`pymoab.types.NAME_TAG_SIZE`
+#: bytes. Writing a wider ``NAME`` tag makes the file unreadable by DAGMC
+#: ("Tag type in file does not match type in database for NAME"), so the
+#: standard width is always used.
+DAGMC_NAME_TAG_SIZE = pymoab.types.NAME_TAG_SIZE
+
+#: Auxiliary tag holding the untruncated group name. DAGMC ignores it, while
+#: stellarmesh uses it to preserve long CAD part and assembly names.
+LONG_NAME_TAG_NAME = "STELLARMESH_NAME"
+
+#: Byte width of :data:`LONG_NAME_TAG_NAME`.
+LONG_NAME_TAG_SIZE = 512
+
+#: Group name prefixes that must stay readable by DAGMC and therefore may not
+#: be truncated.
+UNTRUNCATABLE_PREFIXES = ("mat:", "boundary:")
 
 
 class EntitySet:
@@ -126,20 +141,55 @@ class DAGMCGroup(EntitySet):
 
     @property
     def name(self) -> str:
-        """Name of the group."""
+        """Name of the group.
+
+        Returns the untruncated name when one was stored in the auxiliary
+        :data:`LONG_NAME_TAG_NAME` tag, otherwise the MOAB ``NAME`` tag value.
+        """
         model = self.model
-        return model._core.tag_get_data(model.name_tag, self.handle, flat=True)[0]
+        try:
+            return str(
+                model._core.tag_get_data(
+                    model.long_name_tag, self.handle, flat=True
+                )[0]
+            )
+        except RuntimeError:
+            return model._core.tag_get_data(model.name_tag, self.handle, flat=True)[0]
 
     @name.setter
     def name(self, value: str):
-        name_tag = self.model.name_tag
+        model = self.model
+        name_tag = model.name_tag
         max_bytes = name_tag.get_length()
-        if len(value.encode()) >= max_bytes:
-            raise ValueError(
-                f"DAGMC group name {value!r} must be shorter than the "
-                f"{max_bytes}-byte MOAB NAME tag."
+        encoded = value.encode()
+
+        if len(encoded) >= max_bytes:
+            if value.startswith(UNTRUNCATABLE_PREFIXES):
+                raise ValueError(
+                    f"DAGMC group name {value!r} must be shorter than the "
+                    f"{max_bytes}-byte MOAB NAME tag. DAGMC reads this group "
+                    "directly, so it cannot be truncated."
+                )
+            if len(encoded) >= LONG_NAME_TAG_SIZE:
+                raise ValueError(
+                    f"Group name {value!r} exceeds the "
+                    f"{LONG_NAME_TAG_SIZE}-byte {LONG_NAME_TAG_NAME} tag."
+                )
+            short_value = model._unique_short_name(value, max_bytes - 1)
+            logger.warning(
+                f"Group name {value!r} exceeds the {max_bytes}-byte MOAB NAME "
+                f"tag required by DAGMC. Storing {short_value!r} in NAME and "
+                f"the full name in the {LONG_NAME_TAG_NAME} tag."
             )
-        self.model._core.tag_set_data(name_tag, self.handle, value)
+            model._core.tag_set_data(name_tag, self.handle, short_value)
+            model._core.tag_set_data(model.long_name_tag, self.handle, value)
+            return
+
+        model._core.tag_set_data(name_tag, self.handle, value)
+        try:
+            model._core.tag_delete_data(model.long_name_tag, self.handle)
+        except RuntimeError:
+            pass
 
     @property
     def volumes(self) -> list[DAGMCVolume]:
@@ -450,7 +500,12 @@ class MOABModel:
 
     @cached_property
     def name_tag(self) -> pymoab.tag.Tag:
-        """Name tag, using a wider field for newly created models."""
+        """Name tag.
+
+        New models always use :data:`DAGMC_NAME_TAG_SIZE`, the width DAGMC
+        expects. An existing (possibly legacy, wider) tag is reused so that
+        files written by older versions remain readable.
+        """
         try:
             return self._core.tag_get_handle(pymoab.types.NAME_TAG_NAME)
         except RuntimeError:
@@ -461,6 +516,42 @@ class MOABModel:
                 pymoab.types.MB_TAG_SPARSE,
                 create_if_missing=True,
             )
+
+    @cached_property
+    def long_name_tag(self) -> pymoab.tag.Tag:
+        """Auxiliary tag holding untruncated group names."""
+        return self._core.tag_get_handle(
+            LONG_NAME_TAG_NAME,
+            LONG_NAME_TAG_SIZE,
+            pymoab.types.MB_TYPE_OPAQUE,
+            pymoab.types.MB_TAG_SPARSE,
+            create_if_missing=True,
+        )
+
+    def _unique_short_name(self, value: str, max_bytes: int) -> str:
+        """Truncate a group name to max_bytes, avoiding NAME tag collisions."""
+        existing = set()
+        for group in getattr(self, "groups", []):
+            try:
+                existing.add(
+                    self._core.tag_get_data(self.name_tag, group.handle, flat=True)[0]
+                )
+            except RuntimeError:
+                continue
+
+        def _truncate(text: str) -> str:
+            encoded = text.encode()[:max_bytes]
+            return encoded.decode(errors="ignore")
+
+        candidate = _truncate(value)
+        if candidate not in existing:
+            return candidate
+        for index in range(1, 1000):
+            suffix = f"~{index}"
+            candidate = _truncate(value)[: max_bytes - len(suffix)] + suffix
+            if candidate not in existing:
+                return candidate
+        raise ValueError(f"Could not derive a unique short name for {value!r}.")
 
     @cached_property
     def id_tag(self) -> pymoab.tag.Tag:

@@ -1,4 +1,6 @@
 import build123d as bd
+import pymoab.core
+import pymoab.types
 import pytest
 import stellarmesh as sm
 from pymoab.rng import Range
@@ -120,7 +122,45 @@ class TestDAGMCModel:
         reloaded = sm.DAGMCModel(path)
 
         assert long_name in {group.name for group in reloaded.groups}
-        assert reloaded.name_tag.get_length() > 32
+        # DAGMC hard-codes the NAME tag width, so it must not be widened.
+        assert reloaded.name_tag.get_length() == pymoab.types.NAME_TAG_SIZE
+
+    def test_long_name_keeps_file_dagmc_readable(self, tmp_path):
+        solid = bd.Solid.make_box(1.0, 1.0, 1.0)
+        geometry = sm.Geometry([solid], ["steel"])
+        mesh = sm.SurfaceMesh.from_geometry(
+            geometry, sm.GmshSurfaceOptions(max_mesh_size=1.0)
+        )
+        dagmc_model = sm.DAGMCModel.from_mesh(mesh)
+        group = dagmc_model.create_group(
+            "part:simplified storage tank - blanket salt"
+        )
+        group.global_id = 1
+        group.add(dagmc_model.volumes[0])
+
+        path = tmp_path / "dagmc_readable.h5m"
+        dagmc_model.write(path)
+
+        # Mimic DagMC, which pre-creates the NAME tag before loading the file.
+        core = pymoab.core.Core()
+        core.tag_get_handle(
+            pymoab.types.NAME_TAG_NAME,
+            pymoab.types.NAME_TAG_SIZE,
+            pymoab.types.MB_TYPE_OPAQUE,
+            pymoab.types.MB_TAG_SPARSE,
+            create_if_missing=True,
+        )
+        core.load_file(str(path))
+
+    def test_long_material_name_raises(self, tmp_path):
+        solid = bd.Solid.make_box(1.0, 1.0, 1.0)
+        geometry = sm.Geometry([solid], ["steel"])
+        mesh = sm.SurfaceMesh.from_geometry(
+            geometry, sm.GmshSurfaceOptions(max_mesh_size=1.0)
+        )
+        dagmc_model = sm.DAGMCModel.from_mesh(mesh)
+        with pytest.raises(ValueError, match="MOAB NAME tag"):
+            dagmc_model.create_group("mat:" + "a" * 40)
 
     def test_repr(self, dagmc_model):
         surf = dagmc_model.surfaces[0]
