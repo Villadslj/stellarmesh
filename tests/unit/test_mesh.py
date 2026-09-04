@@ -136,18 +136,37 @@ class TestVolumeMesh:
                 bd.Solid.make_box(1, 1, 1),
                 bd.Solid.make_box(1, 1, 1).transformed(offset=(3, 0, 0)),
             ],
-            ["part_a", "part_b"],
+            ["fe", "ss"],
             assembly_names=[["assembly"], ["assembly"]],
+            part_names=["fe - Block", "ss - Tank"],
         )
         mesh = sm.VolumeMesh.from_geometry(
             geometry,
             sm.GmshVolumeOptions(max_mesh_size=0.5),
-            names="part_b",
+            names="ss - Tank",
         )
         with mesh:
             assert len(gmsh.model.get_entities(3)) == 1
             _, volume_tag = gmsh.model.get_entities(3)[0]
-            assert mesh.entity_metadata(3, volume_tag).material == "part_b"
+            metadata = mesh.entity_metadata(3, volume_tag)
+            assert metadata.material == "ss"
+            assert metadata.part == "ss - Tank"
+
+    def test_surface_mesh_separates_part_and_material_metadata(self):
+        geometry = sm.Geometry(
+            [bd.Solid.make_box(1, 1, 1)],
+            material_names=["fe"],
+            part_names=["fe - Block"],
+        )
+        mesh = sm.SurfaceMesh.from_geometry(
+            geometry,
+            sm.GmshSurfaceOptions(max_mesh_size=0.5),
+        )
+        with mesh:
+            _, volume_tag = gmsh.model.get_entities(3)[0]
+            metadata = mesh.entity_metadata(3, volume_tag)
+            assert metadata.material == "fe"
+            assert metadata.part == "fe - Block"
 
     @pytest.mark.parametrize(
         "geom_name,num_elements_gmsh",

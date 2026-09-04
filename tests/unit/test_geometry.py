@@ -23,6 +23,7 @@ class TestGeometryInitialization:
         else:
             assert geom.solids == solids
         assert geom.material_names == material_names
+        assert geom.part_names == material_names
 
     def test_geometry_init_wrong_materials(self, model_bd_layered_torus):
         solids = model_bd_layered_torus
@@ -58,6 +59,7 @@ class TestGeometryImportExport:
         geom = sm.Geometry.from_step("named.step")
 
         assert geom.material_names == ["ss", "fs"]
+        assert geom.part_names == ["ss", "fs"]
         assert geom.assembly_names == [["top"], ["top"]]
 
     def test_step_import_nested_assembly_names(self):
@@ -74,10 +76,18 @@ class TestGeometryImportExport:
         geom = sm.Geometry.from_step("nested.step")
 
         assert geom.material_names == ["ss - Pin", "ss - Rod"]
+        assert geom.part_names == ["ss - Pin", "ss - Rod"]
         assert geom.assembly_names == [
             ["Engine", "Cylinder sub"],
             ["Engine", "Cylinder sub"],
         ]
+
+        geom.set_material_names(["ss", "ss"])
+
+        assert geom.part_names == ["ss - Pin", "ss - Rod"]
+        selected = geom.select("ss - Pin")
+        assert selected.material_names == ["ss"]
+        assert selected.part_names == ["ss - Pin"]
 
     def test_brep_import_compound(self, model_bd_layered_torus):
         cmp = bd.Compound(model_bd_layered_torus)
@@ -108,6 +118,7 @@ class TestGeometryOperations:
     def test_select_part(self, named_geometry):
         selected = named_geometry.select("part_b")
         assert selected.material_names == ["part_b"]
+        assert selected.part_names == ["part_b"]
         assert selected.assembly_names == [["assembly", "sub"]]
 
     def test_select_assembly(self, named_geometry):
@@ -144,6 +155,7 @@ class TestGeometryOperations:
         result = geom_bd_layered_torus.imprint(batch_size=2)
         assert len(result.solids) == len(geom_bd_layered_torus.solids)
         assert result.material_names == geom_bd_layered_torus.material_names
+        assert result.part_names == geom_bd_layered_torus.part_names
         assert result.assembly_names == geom_bd_layered_torus.assembly_names
 
     def test_geometry_imprint_staged_batch_size_equals_solids(
@@ -199,6 +211,42 @@ class TestMaterialNames:
         geom = sm.Geometry(model_bd_layered_torus, material_names=material_names)
         with pytest.raises(ValueError, match="does not match"):
             geom.set_material_names(["only_one"])
+
+
+class TestPartNames:
+    def test_part_names_are_independent_of_materials(self, model_bd_layered_torus):
+        geom = sm.Geometry(
+            model_bd_layered_torus,
+            material_names=["fe", "fe", "ss"],
+            part_names=["fe - Block", "fe - Pin", "ss - Tank"],
+        )
+
+        geom.set_material_names(["steel", "steel", "steel"])
+
+        assert geom.get_part_names() == [
+            "fe - Block",
+            "fe - Pin",
+            "ss - Tank",
+        ]
+        assert geom.select("fe - Block").material_names == ["steel"]
+
+    def test_get_part_names_returns_copy(self, model_bd_layered_torus):
+        geom = sm.Geometry(
+            model_bd_layered_torus,
+            material_names=["fe", "fe", "ss"],
+            part_names=["fe - Block", "fe - Pin", "ss - Tank"],
+        )
+        result = geom.get_part_names()
+        result[0] = "modified"
+        assert geom.part_names[0] == "fe - Block"
+
+    def test_set_part_names_wrong_length(self, model_bd_layered_torus):
+        geom = sm.Geometry(
+            model_bd_layered_torus,
+            material_names=["fe", "fe", "ss"],
+        )
+        with pytest.raises(ValueError, match="does not match"):
+            geom.set_part_names(["only_one"])
 
 
 class TestAssemblyNames:

@@ -350,6 +350,33 @@ class DAGMCVolume(DAGMCEntitySet):
             new_group.add(self)
 
     @property
+    def part(self) -> Optional[str]:
+        """CAD part name assigned to this volume."""
+        for group in self.groups:
+            if self in group and group.name.startswith("part:"):
+                return group.name[5:]
+        return None
+
+    @part.setter
+    def part(self, name: str):
+        existing_group = False
+        for group in self.model.groups:
+            if f"part:{name}" == group.name:
+                if self in group:
+                    return
+                group.add(self)
+                existing_group = True
+            elif self in group and group.name.startswith("part:"):
+                group.remove(self)
+
+        if not existing_group:
+            new_group = self.model.create_group(f"part:{name}")
+            new_group.global_id = (
+                max((g.global_id for g in self.model.groups), default=0) + 1
+            )
+            new_group.add(self)
+
+    @property
     def bounding_box(
         self,
     ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
@@ -581,14 +608,26 @@ class DAGMCModel(MOABModel):
     """DAGMC Model."""
 
     @property
+    def part_to_volume_ids(self) -> dict[str, list[int]]:
+        """Map CAD part names to DAGMC volume global IDs."""
+        mapping: dict[str, list[int]] = {}
+        for group in self.groups:
+            if not group.name.startswith("part:"):
+                continue
+            mapping[group.name[5:]] = sorted(
+                volume.global_id for volume in group.volumes
+            )
+        return mapping
+
+    @property
     def material_to_volume_ids(self) -> dict[str, list[int]]:
-        """Map material/part name to DAGMC volume global IDs.
+        """Map material names to DAGMC volume global IDs.
 
         This mapping is derived from DAGMC ``mat:<name>`` groups in the model.
         The returned IDs correspond to OpenMC DAGMC cell IDs.
 
         Returns:
-            Dictionary mapping material/part name (without ``mat:`` prefix) to
+            Dictionary mapping material name (without ``mat:`` prefix) to
             sorted list of volume ``GLOBAL_ID`` values.
         """
         mapping: dict[str, list[int]] = {}
@@ -614,36 +653,49 @@ class DAGMCModel(MOABModel):
 
     @property
     def name_to_volume_ids(self) -> dict[str, list[int]]:
-        """Map any part/material or assembly name to DAGMC volume IDs."""
-        mapping = {
-            name: list(volume_ids)
-            for name, volume_ids in self.material_to_volume_ids.items()
-        }
-        for name, volume_ids in self.assembly_to_volume_ids.items():
-            if name in mapping and mapping[name] != volume_ids:
-                raise ValueError(
-                    f"Name {name!r} is used by both a part/material and an assembly. "
-                    "Use material_to_volume_ids or assembly_to_volume_ids explicitly."
-                )
-            mapping[name] = list(volume_ids)
+        """Map any part, assembly, or material name to DAGMC volume IDs."""
+        mapping: dict[str, list[int]] = {}
+        sources = (
+            ("part", self.part_to_volume_ids),
+            ("assembly", self.assembly_to_volume_ids),
+            ("material", self.material_to_volume_ids),
+        )
+        origins: dict[str, str] = {}
+        for origin, source in sources:
+            for name, volume_ids in source.items():
+                if name in mapping and mapping[name] != volume_ids:
+                    raise ValueError(
+                        f"Name {name!r} is used by both {origins[name]} and "
+                        f"{origin} metadata with different volumes. Use the "
+                        "explicit mapping properties to disambiguate it."
+                    )
+                mapping[name] = list(volume_ids)
+                origins.setdefault(name, origin)
         return mapping
 
     def volume_ids(self, name: str) -> list[int]:
-        """Return volume IDs for a part/material or assembly name."""
+        """Return volume IDs for a part, assembly, or material name."""
+        part_ids = self.part_to_volume_ids.get(name)
         material_ids = self.material_to_volume_ids.get(name)
         assembly_ids = self.assembly_to_volume_ids.get(name)
-        if material_ids is not None and assembly_ids is not None:
-            if material_ids != assembly_ids:
-                raise ValueError(
-                    f"Name {name!r} is used by both a part/material and an assembly. "
-                    "Use the explicit mapping property to disambiguate it."
-                )
-            return list(material_ids)
-        if material_ids is not None:
-            return list(material_ids)
-        if assembly_ids is not None:
-            return list(assembly_ids)
-        raise KeyError(f"Unknown material, part, or assembly name: {name}")
+        matches = [
+            (kind, ids)
+            for kind, ids in (
+                ("part", part_ids),
+                ("assembly", assembly_ids),
+                ("material", material_ids),
+            )
+            if ids is not None
+        ]
+        if not matches:
+            raise KeyError(f"Unknown material, part, or assembly name: {name}")
+        if any(ids != matches[0][1] for _, ids in matches[1:]):
+            kinds = ", ".join(kind for kind, _ in matches)
+            raise ValueError(
+                f"Name {name!r} has different volume mappings as {kinds}. "
+                "Use the explicit mapping properties to disambiguate it."
+            )
+        return list(matches[0][1])
 
     def bounding_box(
         self, volume_ids_or_name: Union[str, Iterable[int]]
@@ -651,8 +703,8 @@ class DAGMCModel(MOABModel):
         """Get combined bounding box for selected DAGMC volumes.
 
         Args:
-            volume_ids_or_name: A material/part name, an assembly name, or an
-                iterable of volume ``GLOBAL_ID`` values.
+            volume_ids_or_name: A part, assembly, or material name, or an iterable
+                of volume ``GLOBAL_ID`` values.
 
         Returns:
             Two 3-tuples giving the minimum and maximum XYZ coordinates:
@@ -937,8 +989,11 @@ class DAGMCModel(MOABModel):
         for i, volume_tag in enumerate(volume_tags, start=1):
             volume_set = self.create_volume(volume_tag)
             volume_map[volume_tag] = volume_set
-            mat_name = mesh.entity_metadata(3, volume_tag).material
+            metadata = mesh.entity_metadata(3, volume_tag)
+            mat_name = metadata.material
             volume_set.material = mat_name
+            if (part_name := metadata.part) is not None:
+                volume_set.part = part_name
             log_progress(logger, "Creating DAGMC volumes", i, len(volume_tags))
 
         next_group_id = max((g.global_id for g in self.groups), default=0) + 1

@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, Optional, get_type_hints, overload
+from typing import Any, Literal, Optional, Sequence, get_type_hints, overload
 from urllib.parse import parse_qs, urlencode
 
 import meshio
@@ -320,6 +320,7 @@ class VolumeMetadata(EntityMetadata):
     """Metadata for a Mesh elementary volume."""
 
     material: str = field(init=False)
+    part: str = field(init=False)
 
 
 class Mesh:
@@ -646,11 +647,17 @@ class SurfaceMesh(Mesh):
                 "assembly_names",
                 [[] for _ in geometry.solids],
             )
+            part_names = getattr(
+                geometry,
+                "part_names",
+                geometry.material_names,
+            )
             n_solids = len(geometry.solids)
-            for i, (s, m, assemblies) in enumerate(
+            for i, (s, material, part, assemblies) in enumerate(
                 zip(
                     geometry.solids,
                     geometry.material_names,
+                    part_names,
                     assembly_names,
                     strict=True,
                 ),
@@ -662,7 +669,9 @@ class SurfaceMesh(Mesh):
                     raise TypeError("Importing non-solid geometry.")
 
                 solid_tag = dim_tags[0][1]
-                mesh.entity_metadata(3, solid_tag).material = m
+                metadata = mesh.entity_metadata(3, solid_tag)
+                metadata.material = material
+                metadata.part = part
                 for assembly_name in assemblies:
                     assembly_tags.setdefault(assembly_name, []).append(solid_tag)
                 log_progress(logger, "Importing OCC solids into Gmsh", i, n_solids)
@@ -864,15 +873,20 @@ class VolumeMesh(Mesh):
                     "Imported volume count does not match the selected solid count."
                 )
 
-            for solid_tag, material_name in zip(
-                volume_tags, geometry.material_names, strict=True
+            for solid_tag, material_name, part_name in zip(
+                volume_tags,
+                geometry.material_names,
+                geometry.part_names,
+                strict=True,
             ):
                 metadata_name = urlencode(
-                    {"tag": solid_tag, "material": material_name}
+                    {
+                        "tag": solid_tag,
+                        "material": material_name,
+                        "part": part_name,
+                    }
                 )
-                gmsh.model.add_physical_group(
-                    3, [solid_tag], solid_tag, metadata_name
-                )
+                gmsh.model.add_physical_group(3, [solid_tag], solid_tag, metadata_name)
 
             options.set_options()
             gmsh.model.mesh.generate(3)

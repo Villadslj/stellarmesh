@@ -21,16 +21,20 @@ Volume groups
 
 ::
 
-   tag=<integer>&material=<string>
+   tag=<integer>&material=<string>&part=<string>
 
 * ``tag`` — the volume's Gmsh tag (matches the discrete entity tag in
   the same file).
 * ``material`` — a slug identifying the volume's material region.
-  Slugs are bounded to **28 characters** (a hard MOAB limit downstream
-  in the DAGMC pipeline). 
+* ``part`` — the persistent CAD part name for the volume. It is independent
+  of ``material``, so transport materials can be normalized without losing
+  part identity.
 
 Every volume entity in the file must carry exactly one such physical
 group.
+
+Assembly membership is stored in additional multi-entity physical groups
+named ``assembly:<name>``.
 
 Surface groups
 ==============
@@ -59,6 +63,8 @@ When stellarmesh reads a conforming ``.msh`` file:
 
 * Each volume's ``material`` slug becomes a DAGMC ``mat:<slug>`` group
   in the output ``.h5m`` file.
+* Each volume's ``part`` value becomes a DAGMC ``part:<name>`` group.
+* ``assembly:<name>`` groups are preserved for named assembly selection.
 * Surface ``forward_volume`` / ``reverse_volume`` populate DAGMC's
   surface-sense relationships.
 * Downstream tooling (e.g. OpenMC) maps the ``mat:<slug>`` groups to

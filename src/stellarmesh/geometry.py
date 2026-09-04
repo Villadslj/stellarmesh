@@ -124,17 +124,19 @@ class Geometry:
 
     solids: list[TopoDS_Solid]
     material_names: list[str]
+    part_names: list[str]
     assembly_names: list[list[str]]
     faces: list[TopoDS_Face]
     face_boundary_conditions: list[str]
 
-    def __init__(  # noqa: PLR0912
+    def __init__(  # noqa: PLR0912, PLR0913, PLR0917
         self,
         solids: Optional[Sequence[Solid | TopoDS_Solid]] = None,
         material_names: Optional[Sequence[str]] = None,
         surfaces: Optional[Sequence[Face | Shell | TopoDS_Face | TopoDS_Shell]] = None,
         surface_boundary_conditions: Optional[Sequence[str]] = None,
         assembly_names: Optional[Sequence[Sequence[str]]] = None,
+        part_names: Optional[Sequence[str]] = None,
     ):
         """Construct geometry from solids.
 
@@ -148,6 +150,8 @@ class Geometry:
             length of surfaces.
             assembly_names: Assembly names containing each solid. Must match the
                 length of solids. Each solid may belong to multiple nested assemblies.
+            part_names: CAD part names matching the solids. If omitted, material
+                names are used for backward compatibility.
         """
         if (solids and not material_names) or (material_names and not solids):
             raise ValueError(
@@ -165,11 +169,17 @@ class Geometry:
 
         self.solids = []
         self.material_names = []
+        self.part_names = []
         self.assembly_names = []
         if solids and material_names:
             if assembly_names is not None and len(assembly_names) != len(solids):
                 raise ValueError(
                     f"Length of assembly_names ({len(assembly_names)}) does not match "
+                    f"number of solids ({len(solids)})."
+                )
+            if part_names is not None and len(part_names) != len(solids):
+                raise ValueError(
+                    f"Length of part_names ({len(part_names)}) does not match "
                     f"number of solids ({len(solids)})."
                 )
             for i, (s, mat_name) in enumerate(zip(solids, material_names, strict=True)):
@@ -189,6 +199,9 @@ class Geometry:
 
                 self.solids.append(s_wrapped)
                 self.material_names.append(mat_name)
+                self.part_names.append(
+                    part_names[i] if part_names is not None else mat_name
+                )
                 names = assembly_names[i] if assembly_names is not None else ()
                 if isinstance(names, str):
                     raise TypeError(
@@ -252,6 +265,19 @@ class Geometry:
             )
         self.material_names = list(material_names)
 
+    def get_part_names(self) -> list[str]:
+        """Return a copy of the CAD part names."""
+        return list(self.part_names)
+
+    def set_part_names(self, part_names: Sequence[str]) -> None:
+        """Set CAD part names for the geometry."""
+        if len(part_names) != len(self.solids):
+            raise ValueError(
+                f"Length of part_names ({len(part_names)}) does not match "
+                f"number of solids ({len(self.solids)})."
+            )
+        self.part_names = list(part_names)
+
     def get_assembly_names(self) -> list[list[str]]:
         """Return assembly memberships for each solid."""
         return [list(names) for names in self.assembly_names]
@@ -276,7 +302,7 @@ class Geometry:
     def select(self, names: str | Sequence[str]) -> Geometry:
         """Return a geometry containing solids matching part or assembly names.
 
-        Part names are stored in :attr:`material_names`, while assembly names
+        Part names are stored in :attr:`part_names`, while assembly names
         are stored in :attr:`assembly_names`. If a name is used for both a part
         and an assembly, both uses must select the same solids.
 
@@ -301,7 +327,7 @@ class Geometry:
         for name in requested_names:
             part_indices = {
                 index
-                for index, part_name in enumerate(self.material_names)
+                for index, part_name in enumerate(self.part_names)
                 if part_name == name
             }
             assembly_indices = {
@@ -318,7 +344,7 @@ class Geometry:
             name_indices = part_indices or assembly_indices
             if not name_indices:
                 available = sorted(
-                    set(self.material_names).union(
+                    set(self.part_names).union(
                         assembly
                         for assemblies in self.assembly_names
                         for assembly in assemblies
@@ -335,6 +361,7 @@ class Geometry:
             solids=[self.solids[index] for index in ordered_indices],
             material_names=[self.material_names[index] for index in ordered_indices],
             assembly_names=[self.assembly_names[index] for index in ordered_indices],
+            part_names=[self.part_names[index] for index in ordered_indices],
         )
 
     @staticmethod
@@ -506,7 +533,7 @@ class Geometry:
             names = [f"solid_{i}" for i in range(n_solids)]
             assembly_names = [[] for _ in range(n_solids)]
 
-        logger.info(f"Extracted material names from STEP file: {names}")
+        logger.info(f"Extracted part names from STEP file: {names}")
         logger.info(f"Extracted assembly names from STEP file: {assembly_names}")
         return names, assembly_names
 
@@ -523,6 +550,7 @@ class Geometry:
         filename: str,
         material_names: Optional[Sequence[str]] = None,
         assembly_names: Optional[Sequence[Sequence[str]]] = None,
+        part_names: Optional[Sequence[str]] = None,
     ) -> Geometry:
         """Import model from a step file.
 
@@ -535,6 +563,8 @@ class Geometry:
                 If None, material names are extracted from STEP part names.
             assembly_names: Assembly memberships matching solids in file. If None,
                 names are extracted from the STEP assembly hierarchy.
+            part_names: CAD part names matching solids in file. If None, names
+                are extracted from STEP product labels.
 
         Returns:
             Model.
@@ -560,16 +590,23 @@ class Geometry:
             shape = reader.Shape(i + 1)
             solids.extend(cls._get_solids_from_shape(shape))
 
-        if material_names is None or assembly_names is None:
-            extracted_materials, extracted_assemblies = cls._extract_step_metadata(
+        if material_names is None or assembly_names is None or part_names is None:
+            extracted_parts, extracted_assemblies = cls._extract_step_metadata(
                 filename, len(solids)
             )
             if material_names is None:
-                material_names = extracted_materials
+                material_names = extracted_parts
             if assembly_names is None:
                 assembly_names = extracted_assemblies
+            if part_names is None:
+                part_names = extracted_parts
 
-        return cls(solids, material_names, assembly_names=assembly_names)
+        return cls(
+            solids,
+            material_names,
+            assembly_names=assembly_names,
+            part_names=part_names,
+        )
 
     @classmethod
     def import_step(
@@ -577,6 +614,7 @@ class Geometry:
         filename: str,
         material_names: Optional[Sequence[str]] = None,
         assembly_names: Optional[Sequence[Sequence[str]]] = None,
+        part_names: Optional[Sequence[str]] = None,
     ) -> Geometry:
         """Import model from a step file.
 
@@ -584,6 +622,7 @@ class Geometry:
             filename: File path to import.
             material_names: Ordered list of material names matching solids in file.
             assembly_names: Assembly memberships matching solids in file.
+            part_names: CAD part names matching solids in file.
 
         Returns:
             Model.
@@ -593,19 +632,21 @@ class Geometry:
             FutureWarning,
             stacklevel=2,
         )
-        return cls.from_step(filename, material_names, assembly_names)
+        return cls.from_step(filename, material_names, assembly_names, part_names)
 
     @classmethod
     def from_brep(
         cls,
         filename: str,
         material_names: Sequence[str],
+        part_names: Optional[Sequence[str]] = None,
     ) -> Geometry:
         """Import model from a brep (cadquery, build123d native) file.
 
         Args:
             filename: File path to import.
             material_names: Ordered list of material names matching solids in file.
+            part_names: Optional CAD part names matching solids in file.
 
         Returns:
             Model.
@@ -621,19 +662,21 @@ class Geometry:
         solids = cls._get_solids_from_shape(shape)
 
         logger.info(f"Importing {len(solids)} from {filename}")
-        return cls(solids, material_names)
+        return cls(solids, material_names, part_names=part_names)
 
     @classmethod
     def import_brep(
         cls,
         filename: str,
         material_names: Sequence[str],
+        part_names: Optional[Sequence[str]] = None,
     ) -> Geometry:
         """Import model from a brep (cadquery, build123d native) file.
 
         Args:
             filename: File path to import.
             material_names: Ordered list of material names matching solids in file.
+            part_names: Optional CAD part names matching solids in file.
 
         Returns:
             Model.
@@ -643,7 +686,7 @@ class Geometry:
             FutureWarning,
             stacklevel=2,
         )
-        return cls.from_brep(filename, material_names)
+        return cls.from_brep(filename, material_names, part_names)
 
     @staticmethod
     def _get_bounding_box(
@@ -780,6 +823,7 @@ class Geometry:
             res_solids,
             self.material_names,
             assembly_names=self.assembly_names,
+            part_names=self.part_names,
         )
 
     def _imprint_staged(self, batch_size: int) -> Geometry:
@@ -828,6 +872,7 @@ class Geometry:
             list(result_solids),  # type: ignore[arg-type]
             self.material_names,
             assembly_names=self.assembly_names,
+            part_names=self.part_names,
         )
 
     def _build_adjacency(
