@@ -43,6 +43,8 @@ except ImportError as e:
 
 logger = logging.getLogger(__name__)
 
+DAGMC_NAME_TAG_SIZE = 128
+
 
 class EntitySet:
     """A MOAB entity set."""
@@ -130,7 +132,14 @@ class DAGMCGroup(EntitySet):
 
     @name.setter
     def name(self, value: str):
-        self.model._core.tag_set_data(self.model.name_tag, self.handle, value)
+        name_tag = self.model.name_tag
+        max_bytes = name_tag.get_length()
+        if len(value.encode()) >= max_bytes:
+            raise ValueError(
+                f"DAGMC group name {value!r} must be shorter than the "
+                f"{max_bytes}-byte MOAB NAME tag."
+            )
+        self.model._core.tag_set_data(name_tag, self.handle, value)
 
     @property
     def volumes(self) -> list[DAGMCVolume]:
@@ -414,14 +423,17 @@ class MOABModel:
 
     @cached_property
     def name_tag(self) -> pymoab.tag.Tag:
-        """Name tag."""
-        return self._core.tag_get_handle(
-            pymoab.types.NAME_TAG_NAME,
-            pymoab.types.NAME_TAG_SIZE,
-            pymoab.types.MB_TYPE_OPAQUE,
-            pymoab.types.MB_TAG_SPARSE,
-            create_if_missing=True,
-        )
+        """Name tag, using a wider field for newly created models."""
+        try:
+            return self._core.tag_get_handle(pymoab.types.NAME_TAG_NAME)
+        except RuntimeError:
+            return self._core.tag_get_handle(
+                pymoab.types.NAME_TAG_NAME,
+                DAGMC_NAME_TAG_SIZE,
+                pymoab.types.MB_TYPE_OPAQUE,
+                pymoab.types.MB_TAG_SPARSE,
+                create_if_missing=True,
+            )
 
     @cached_property
     def id_tag(self) -> pymoab.tag.Tag:
@@ -934,11 +946,6 @@ class DAGMCModel(MOABModel):
             group_name = gmsh.model.get_physical_name(dim, physical_tag)
             if not group_name.startswith("assembly:"):
                 continue
-            if len(group_name.encode()) > pymoab.types.NAME_TAG_SIZE:
-                raise ValueError(
-                    f"DAGMC assembly group name {group_name!r} exceeds the "
-                    f"{pymoab.types.NAME_TAG_SIZE}-byte MOAB NAME tag limit."
-                )
             group = self.create_group(group_name)
             group.global_id = next_group_id
             next_group_id += 1

@@ -822,7 +822,12 @@ class VolumeMesh(Mesh):
 
     @classmethod
     def from_geometry(
-        cls, geometry: Geometry, options: GmshVolumeOptions
+        cls,
+        geometry: Geometry,
+        options: GmshVolumeOptions,
+        *,
+        names: str | Sequence[str] | None = None,
+        native_import: bool = True,
     ) -> VolumeMesh:
         """Mesh solids with Gmsh.
 
@@ -832,16 +837,42 @@ class VolumeMesh(Mesh):
         Args:
             geometry: Geometry to be meshed.
             options: Meshing options.
+            names: Optional part or assembly name(s) used to select a subset of
+                the geometry before meshing.
+            native_import: Import solids directly through their OpenCascade
+                pointers. Disable to use an intermediate BREP file, which is
+                slower but supports some transformed or imprinted solids that
+                Gmsh cannot import directly.
         """
+        if names is not None:
+            geometry = geometry.select(names)
+
         with cls() as mesh:
             gmsh.model.add("stellarmesh_model")
 
+            volume_tags = []
             for s in geometry.solids:
-                dim_tags = gmsh.model.occ.import_shapes_native_pointer(s._address())
-                if dim_tags[0][0] != 3:
+                dim_tags = SurfaceMesh._import_occ(s, native=native_import)
+                imported_volume_tags = [tag for dim, tag in dim_tags if dim == 3]
+                if len(imported_volume_tags) != 1:
                     raise TypeError("Importing non-solid geometry.")
+                volume_tags.append(imported_volume_tags[0])
 
             gmsh.model.occ.synchronize()
+            if len(gmsh.model.get_entities(3)) != len(geometry.solids):
+                raise RuntimeError(
+                    "Imported volume count does not match the selected solid count."
+                )
+
+            for solid_tag, material_name in zip(
+                volume_tags, geometry.material_names, strict=True
+            ):
+                metadata_name = urlencode(
+                    {"tag": solid_tag, "material": material_name}
+                )
+                gmsh.model.add_physical_group(
+                    3, [solid_tag], solid_tag, metadata_name
+                )
 
             options.set_options()
             gmsh.model.mesh.generate(3)

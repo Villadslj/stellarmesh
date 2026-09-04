@@ -92,6 +92,48 @@ class TestGeometryImportExport:
 
 
 class TestGeometryOperations:
+    @pytest.fixture
+    def named_geometry(self):
+        solids = [
+            bd.Solid.make_box(1, 1, 1),
+            bd.Solid.make_box(1, 1, 1).transformed(offset=(2, 0, 0)),
+            bd.Solid.make_box(1, 1, 1).transformed(offset=(4, 0, 0)),
+        ]
+        return sm.Geometry(
+            solids,
+            ["part_a", "part_b", "part_c"],
+            assembly_names=[["assembly"], ["assembly", "sub"], ["other"]],
+        )
+
+    def test_select_part(self, named_geometry):
+        selected = named_geometry.select("part_b")
+        assert selected.material_names == ["part_b"]
+        assert selected.assembly_names == [["assembly", "sub"]]
+
+    def test_select_assembly(self, named_geometry):
+        selected = named_geometry.select("assembly")
+        assert selected.material_names == ["part_a", "part_b"]
+
+    def test_select_multiple_names_deduplicates(self, named_geometry):
+        selected = named_geometry.select(["assembly", "part_b", "part_c"])
+        assert selected.material_names == ["part_a", "part_b", "part_c"]
+
+    def test_select_unknown_name(self, named_geometry):
+        with pytest.raises(KeyError, match="Available names"):
+            named_geometry.select("missing")
+
+    def test_select_ambiguous_name(self):
+        geometry = sm.Geometry(
+            [
+                bd.Solid.make_box(1, 1, 1),
+                bd.Solid.make_box(1, 1, 1).transformed(offset=(2, 0, 0)),
+            ],
+            ["shared", "other"],
+            assembly_names=[[], ["shared"]],
+        )
+        with pytest.raises(ValueError, match="both a part and an assembly"):
+            geometry.select("shared")
+
     def test_geometry_imprint(self, geom_bd_layered_torus):
         geom_bd_layered_torus.imprint()
 

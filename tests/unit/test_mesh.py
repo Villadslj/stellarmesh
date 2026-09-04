@@ -130,6 +130,25 @@ class TestSurfaceMesh:
 
 
 class TestVolumeMesh:
+    def test_volume_mesh_named_selection(self):
+        geometry = sm.Geometry(
+            [
+                bd.Solid.make_box(1, 1, 1),
+                bd.Solid.make_box(1, 1, 1).transformed(offset=(3, 0, 0)),
+            ],
+            ["part_a", "part_b"],
+            assembly_names=[["assembly"], ["assembly"]],
+        )
+        mesh = sm.VolumeMesh.from_geometry(
+            geometry,
+            sm.GmshVolumeOptions(max_mesh_size=0.5),
+            names="part_b",
+        )
+        with mesh:
+            assert len(gmsh.model.get_entities(3)) == 1
+            _, volume_tag = gmsh.model.get_entities(3)[0]
+            assert mesh.entity_metadata(3, volume_tag).material == "part_b"
+
     @pytest.mark.parametrize(
         "geom_name,num_elements_gmsh",
         [

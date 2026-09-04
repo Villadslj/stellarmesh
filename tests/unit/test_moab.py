@@ -102,6 +102,25 @@ class TestDAGMCModel:
         group.remove(surf)
         assert group.surfaces == []
 
+    def test_long_group_name_round_trip(self, tmp_path):
+        solid = bd.Solid.make_box(1.0, 1.0, 1.0)
+        geometry = sm.Geometry([solid], ["steel"])
+        mesh = sm.SurfaceMesh.from_geometry(
+            geometry, sm.GmshSurfaceOptions(max_mesh_size=1.0)
+        )
+        dagmc_model = sm.DAGMCModel.from_mesh(mesh)
+        long_name = "assembly:simplified storage tank - blanket salt"
+        group = dagmc_model.create_group(long_name)
+        group.global_id = 1
+        group.add(dagmc_model.volumes[0])
+
+        path = tmp_path / "long_name.h5m"
+        dagmc_model.write(path)
+        reloaded = sm.DAGMCModel(path)
+
+        assert long_name in {group.name for group in reloaded.groups}
+        assert reloaded.name_tag.get_length() > 32
+
     def test_repr(self, dagmc_model):
         surf = dagmc_model.surfaces[0]
         repr(surf)

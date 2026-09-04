@@ -273,6 +273,70 @@ class Geometry:
             normalized_names.append(list(dict.fromkeys(names)))
         self.assembly_names = normalized_names
 
+    def select(self, names: str | Sequence[str]) -> Geometry:
+        """Return a geometry containing solids matching part or assembly names.
+
+        Part names are stored in :attr:`material_names`, while assembly names
+        are stored in :attr:`assembly_names`. If a name is used for both a part
+        and an assembly, both uses must select the same solids.
+
+        Args:
+            names: Part/assembly name or sequence of names to select.
+
+        Returns:
+            New geometry containing the selected solids and their metadata.
+            Standalone surfaces and surface boundary conditions are omitted
+            because they cannot be unambiguously associated with selected
+            solids.
+
+        Raises:
+            KeyError: If a requested name is not present.
+            ValueError: If no names are provided or a name is ambiguous.
+        """
+        requested_names = [names] if isinstance(names, str) else list(names)
+        if not requested_names:
+            raise ValueError("At least one part or assembly name is required.")
+
+        selected_indices: set[int] = set()
+        for name in requested_names:
+            part_indices = {
+                index
+                for index, part_name in enumerate(self.material_names)
+                if part_name == name
+            }
+            assembly_indices = {
+                index
+                for index, assemblies in enumerate(self.assembly_names)
+                if name in assemblies
+            }
+            if part_indices and assembly_indices and part_indices != assembly_indices:
+                raise ValueError(
+                    f"Name {name!r} is used by both a part and an assembly with "
+                    "different solids."
+                )
+
+            name_indices = part_indices or assembly_indices
+            if not name_indices:
+                available = sorted(
+                    set(self.material_names).union(
+                        assembly
+                        for assemblies in self.assembly_names
+                        for assembly in assemblies
+                    )
+                )
+                raise KeyError(
+                    f"Unknown part or assembly name {name!r}. "
+                    f"Available names: {', '.join(available)}"
+                )
+            selected_indices.update(name_indices)
+
+        ordered_indices = sorted(selected_indices)
+        return type(self)(
+            solids=[self.solids[index] for index in ordered_indices],
+            material_names=[self.material_names[index] for index in ordered_indices],
+            assembly_names=[self.assembly_names[index] for index in ordered_indices],
+        )
+
     @staticmethod
     @overload
     def _get_child_shapes(
