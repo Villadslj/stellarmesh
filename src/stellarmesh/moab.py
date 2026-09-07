@@ -8,6 +8,7 @@ desc: MOABModel class represents a MOAB model.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import subprocess
@@ -155,9 +156,7 @@ class DAGMCGroup(EntitySet):
         model = self.model
         try:
             return str(
-                model._core.tag_get_data(
-                    model.long_name_tag, self.handle, flat=True
-                )[0]
+                model._core.tag_get_data(model.long_name_tag, self.handle, flat=True)[0]
             )
         except RuntimeError:
             return model._core.tag_get_data(model.name_tag, self.handle, flat=True)[0]
@@ -192,10 +191,8 @@ class DAGMCGroup(EntitySet):
             return
 
         model._core.tag_set_data(name_tag, self.handle, value)
-        try:
+        with contextlib.suppress(RuntimeError):
             model._core.tag_delete_data(model.long_name_tag, self.handle)
-        except RuntimeError:
-            pass
 
     @property
     def volumes(self) -> list[DAGMCVolume]:
@@ -639,9 +636,7 @@ class MOABModel:
         lookup[node_tags] = vertex_handles
         return lookup
 
-    def _create_elements(
-        self, dim: int, tag: int, node_lookup: np.ndarray
-    ) -> Range:
+    def _create_elements(self, dim: int, tag: int, node_lookup: np.ndarray) -> Range:
         """Generic element creation for any dimension (2D or 3D)."""
         element_types, _, node_tags_list = gmsh.model.mesh.get_elements(dim, tag)
         all_new_handles = Range()
@@ -652,7 +647,10 @@ class MOABModel:
                 continue
             moab_type, nodes_per_elem = mapped_type
             node_tags_array = np.asarray(node_tags, dtype=np.uint64)
-            if node_tags_array.size > 0 and int(node_tags_array.max()) >= node_lookup.size:
+            if (
+                node_tags_array.size > 0
+                and int(node_tags_array.max()) >= node_lookup.size
+            ):
                 raise ValueError("Encountered unknown node tag when creating elements.")
             conn = node_lookup[node_tags_array]
             if np.any(conn == 0):
@@ -933,6 +931,7 @@ class DAGMCModel(MOABModel):
             [binary_path, str(input_filename), "-o", str(output_filename)],
             check=True,
         )
+        return True
 
     @staticmethod
     def check_overlap(
@@ -1099,15 +1098,21 @@ class DAGMCModel(MOABModel):
             volume_map[volume_tag] = volume_set
             metadata = mesh.entity_metadata(3, volume_tag)
             mat_name = str(metadata.material)
-            if mat_name not in material_volume_handles:
-                material_volume_handles[mat_name] = []
-                grouped_order.append(("mat", mat_name))
-            material_volume_handles[mat_name].append(volume_set.handle)
+            self._append_group_member(
+                material_volume_handles,
+                grouped_order,
+                "mat",
+                mat_name,
+                volume_set.handle,
+            )
             if (part_name := metadata.part) is not None:
-                if part_name not in part_volume_handles:
-                    part_volume_handles[part_name] = []
-                    grouped_order.append(("part", part_name))
-                part_volume_handles[part_name].append(volume_set.handle)
+                self._append_group_member(
+                    part_volume_handles,
+                    grouped_order,
+                    "part",
+                    part_name,
+                    volume_set.handle,
+                )
             log_progress(logger, "Creating DAGMC volumes", i, len(volume_tags))
 
         for group_type, name in grouped_order:
@@ -1116,6 +1121,12 @@ class DAGMCModel(MOABModel):
             else:
                 self._create_batched_group(f"part:{name}", part_volume_handles[name])
 
+        self._add_assembly_groups(volume_map)
+        self._set_surface_sense(mesh, surface_map, volume_map)
+        self._warn_empty_volumes(volume_map)
+
+    def _add_assembly_groups(self, volume_map: dict[int, DAGMCVolume]):
+        """Create assembly groups from physical groups."""
         next_group_id = max((g.global_id for g in self.groups), default=0) + 1
         for dim, physical_tag in gmsh.model.get_physical_groups(3):
             group_name = gmsh.model.get_physical_name(dim, physical_tag)
@@ -1129,6 +1140,13 @@ class DAGMCModel(MOABModel):
             ):
                 group.add(volume_map[volume_tag])
 
+    def _set_surface_sense(
+        self,
+        mesh: Mesh,
+        surface_map: dict[int, DAGMCSurface],
+        volume_map: dict[int, DAGMCVolume],
+    ):
+        """Set forward/reverse volume sense metadata on surfaces."""
         for surface_tag, surface in surface_map.items():
             metadata = mesh.entity_metadata(2, surface_tag)
             if (forward_vol_tag := metadata.forward_volume) is not None:
@@ -1140,6 +1158,8 @@ class DAGMCModel(MOABModel):
                 assert reverse_vol is not None
                 surface.reverse_volume = reverse_vol
 
+    def _warn_empty_volumes(self, volume_map: dict[int, DAGMCVolume]):
+        """Log empty-volume errors for volumes with no assigned surfaces."""
         # Warn on empty volumes
         for volume in volume_map.values():
             if not self._core.get_child_meshsets(volume.handle):
@@ -1162,10 +1182,25 @@ class DAGMCModel(MOABModel):
         self, name: str, handles: Iterable[np.uint64]
     ) -> DAGMCGroup:
         """Create a group once and add all handles in a single add_entities call."""
+        next_group_id = self._next_group_id()
         group = self.create_group(name)
-        group.global_id = self._next_group_id()
+        group.global_id = next_group_id
         self._core.add_entities(group.handle, np.asarray(handles, dtype=np.uint64))
         return group
+
+    @staticmethod
+    def _append_group_member(
+        grouped_handles: dict[str, list[np.uint64]],
+        grouped_order: list[tuple[str, str]],
+        group_type: str,
+        name: str,
+        handle: np.uint64,
+    ):
+        """Append a handle and track first-seen creation order by group name."""
+        if name not in grouped_handles:
+            grouped_handles[name] = []
+            grouped_order.append((group_type, name))
+        grouped_handles[name].append(handle)
 
     @classmethod
     def make_from_mesh(cls, mesh: Mesh) -> DAGMCModel:

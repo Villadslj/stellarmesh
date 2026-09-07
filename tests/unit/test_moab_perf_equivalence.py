@@ -17,7 +17,9 @@ def _build_imprinted_surface_mesh() -> sm.SurfaceMesh:
         part_names=["fe - Block", "ss - Tank"],
         assembly_names=[["assembly"], ["assembly", "subassembly"]],
     ).imprint()
-    mesh = sm.SurfaceMesh.from_geometry(geometry, sm.GmshSurfaceOptions(max_mesh_size=5))
+    mesh = sm.SurfaceMesh.from_geometry(
+        geometry, sm.GmshSurfaceOptions(max_mesh_size=5)
+    )
     with mesh:
         surface_tag = sm_moab.gmsh.model.get_entities(2)[0][1]
         mesh.entity_metadata(2, surface_tag).boundary_condition = "vacuum"
@@ -59,7 +61,7 @@ def _reference_create_elements(
         conn = np.array([node_tag_map[t] for t in node_tags], dtype=np.uint64).reshape(
             -1, nodes_per_elem
         )
-        all_new_handles = [model._core.create_element(moab_type, c) for c in conn]
+        all_new_handles.extend(model._core.create_element(moab_type, c) for c in conn)
 
     return Range(all_new_handles)
 
@@ -92,7 +94,9 @@ def _reference_add_surfaces(
         if (bc := mesh.entity_metadata(2, surface_tag).boundary_condition) is not None:
             surface_set.boundary = bc
 
-        _reference_create_surface_elements(model, surface_tag, surface_set, node_tag_map)
+        _reference_create_surface_elements(
+            model, surface_tag, surface_set, node_tag_map
+        )
         model._create_volume_friend_for_lonely_surfaces(surface_tag, surface_set)
 
     return surface_map
@@ -150,7 +154,9 @@ def _build_reference_dagmc(mesh: sm.Mesh) -> sm.DAGMCModel:
 
 def _vertex_count(model: sm.DAGMCModel) -> int:
     return len(
-        model._core.get_entities_by_type(model.root_set, pymoab.types.MBVERTEX, recur=True)
+        model._core.get_entities_by_type(
+            model.root_set, pymoab.types.MBVERTEX, recur=True
+        )
     )
 
 
@@ -192,7 +198,8 @@ def _triangle_connectivity(model: sm.DAGMCModel) -> set[tuple[int, int, int]]:
         node_ids = model._core.tag_get_data(
             model.id_tag, model._core.get_connectivity(triangle), flat=True
         )
-        tri = tuple(sorted(int(node_id) for node_id in node_ids))
+        sorted_node_ids = sorted(int(node_id) for node_id in node_ids)
+        tri = (sorted_node_ids[0], sorted_node_ids[1], sorted_node_ids[2])
         connectivity.add(tri)
     return connectivity
 
@@ -221,10 +228,14 @@ def test_dagmc_model_batched_builder_matches_reference(tmp_path):
         )
         assert (
             opt_surface.forward_volume.global_id if opt_surface.forward_volume else None
-        ) == (ref_surface.forward_volume.global_id if ref_surface.forward_volume else None)
+        ) == (
+            ref_surface.forward_volume.global_id if ref_surface.forward_volume else None
+        )
         assert (
             opt_surface.reverse_volume.global_id if opt_surface.reverse_volume else None
-        ) == (ref_surface.reverse_volume.global_id if ref_surface.reverse_volume else None)
+        ) == (
+            ref_surface.reverse_volume.global_id if ref_surface.reverse_volume else None
+        )
 
     assert _vertex_coordinates(optimized) == _vertex_coordinates(reference)
     assert _triangle_connectivity(optimized) == _triangle_connectivity(reference)
@@ -270,5 +281,9 @@ def test_create_elements_handles_multiple_element_types(monkeypatch):
     created = model._create_elements(3, 1, node_lookup)
 
     assert len(created) == 2
-    assert len(model._core.get_entities_by_type(model.root_set, pymoab.types.MBTRI)) == 1
-    assert len(model._core.get_entities_by_type(model.root_set, pymoab.types.MBTET)) == 1
+    assert (
+        len(model._core.get_entities_by_type(model.root_set, pymoab.types.MBTRI)) == 1
+    )
+    assert (
+        len(model._core.get_entities_by_type(model.root_set, pymoab.types.MBTET)) == 1
+    )

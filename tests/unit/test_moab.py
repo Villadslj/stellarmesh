@@ -132,9 +132,7 @@ class TestDAGMCModel:
             geometry, sm.GmshSurfaceOptions(max_mesh_size=1.0)
         )
         dagmc_model = sm.DAGMCModel.from_mesh(mesh)
-        group = dagmc_model.create_group(
-            "part:simplified storage tank - blanket salt"
-        )
+        group = dagmc_model.create_group("part:simplified storage tank - blanket salt")
         group.global_id = 1
         group.add(dagmc_model.volumes[0])
 
