@@ -1288,7 +1288,8 @@ class MOABVolumeModel(MOABModel):
 
             # Simply add all 3D elements to the root set
             for _, tag in gmsh.model.get_entities(3):
-                elements = model._create_elements(3, tag, node_lookup)
-                model._core.add_entities(model.root_set, elements)
+                # Core.create_element(s) already creates entities in the root set.
+                # Re-adding returned handles can fail on some PyMOAB builds.
+                model._create_elements(3, tag, node_lookup)
 
         return model
