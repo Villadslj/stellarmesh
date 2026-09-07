@@ -60,6 +60,12 @@ LONG_NAME_TAG_SIZE = 512
 #: be truncated.
 UNTRUNCATABLE_PREFIXES = ("mat:", "boundary:")
 
+ELEMENT_TYPE_TO_MOAB: dict[int, tuple[int, int]] = {
+    2: (pymoab.types.MBTRI, 3),
+    4: (pymoab.types.MBTET, 4),
+    5: (pymoab.types.MBHEX, 8),
+}
+
 
 class EntitySet:
     """A MOAB entity set."""
@@ -611,47 +617,51 @@ class MOABModel:
             self.root_set, pymoab.types.MBTRI, recur=True
         )
 
-    def _add_nodes(self) -> dict[int, int]:
+    def _add_nodes(self) -> np.ndarray:
         """Generic node addition logic shared by all MOAB-based models."""
         node_tags, coords, _ = gmsh.model.mesh.get_nodes()
         if np.isnan(coords).any():
             raise ValueError("Mesh coordinates contain NaNs.")
         if np.isinf(coords).any():
             raise ValueError("Mesh coordinates contain infinite values.")
+        node_tags = np.asarray(node_tags, dtype=np.uint64)
+        if np.unique(node_tags).size != node_tags.size:
+            raise ValueError("Duplicate node tags found.")
 
         moab_vertices = self._core.create_vertices(coords)
         self._core.tag_set_data(self.id_tag, moab_vertices, node_tags.astype(np.int32))  # pyright: ignore[reportAttributeAccessIssue]
 
-        node_tag_map = dict(zip(node_tags, moab_vertices, strict=True))
-        if len(node_tag_map) != len(node_tags):
-            raise ValueError("Duplicate node tags found.")
-        return node_tag_map
+        vertex_handles = np.fromiter(
+            moab_vertices, dtype=np.uint64, count=moab_vertices.size()
+        )
+        max_node_tag = int(node_tags.max()) if node_tags.size else 0
+        lookup = np.zeros(max_node_tag + 1, dtype=np.uint64)
+        lookup[node_tags] = vertex_handles
+        return lookup
 
     def _create_elements(
-        self, dim: int, tag: int, node_tag_map: dict[int, int]
+        self, dim: int, tag: int, node_lookup: np.ndarray
     ) -> Range:
         """Generic element creation for any dimension (2D or 3D)."""
         element_types, _, node_tags_list = gmsh.model.mesh.get_elements(dim, tag)
-        all_new_handles = []
+        all_new_handles = Range()
 
         for elem_type, node_tags in zip(element_types, node_tags_list, strict=True):
-            # Map Gmsh types to MOAB types
-            if elem_type == 2:  # Triangle
-                moab_type, nodes_per_elem = pymoab.types.MBTRI, 3
-            elif elem_type == 4:  # Tet
-                moab_type, nodes_per_elem = pymoab.types.MBTET, 4
-            elif elem_type == 5:  # Hex
-                moab_type, nodes_per_elem = pymoab.types.MBHEX, 8
-            else:
+            mapped_type = ELEMENT_TYPE_TO_MOAB.get(elem_type)
+            if mapped_type is None:
                 continue
+            moab_type, nodes_per_elem = mapped_type
+            node_tags_array = np.asarray(node_tags, dtype=np.uint64)
+            if node_tags_array.size > 0 and int(node_tags_array.max()) >= node_lookup.size:
+                raise ValueError("Encountered unknown node tag when creating elements.")
+            conn = node_lookup[node_tags_array]
+            if np.any(conn == 0):
+                raise ValueError("Encountered unknown node tag when creating elements.")
+            conn = conn.reshape(-1, nodes_per_elem)
+            new_handles = self._core.create_elements(moab_type, conn)
+            all_new_handles.merge(new_handles)
 
-            conn = np.array(
-                [node_tag_map[t] for t in node_tags], dtype=np.uint64
-            ).reshape(-1, nodes_per_elem)
-
-            all_new_handles = [self._core.create_element(moab_type, c) for c in conn]
-
-        return Range(all_new_handles)
+        return all_new_handles
 
     @classmethod
     def from_mesh(cls, mesh: Mesh) -> MOABModel:
@@ -1006,21 +1016,22 @@ class DAGMCModel(MOABModel):
 
             gmsh.model.mesh.removeDuplicateNodes()
 
-            node_tag_map = model._add_nodes()
-            surface_map = model._add_surfaces(mesh, node_tag_map)
+            node_lookup = model._add_nodes()
+            surface_map = model._add_surfaces(mesh, node_lookup)
             model._add_volumes(mesh, surface_map)
             model._finalize_file_set()
 
             return model
 
     def _add_surfaces(
-        self, mesh: Mesh, node_tag_map: dict[int, int]
+        self, mesh: Mesh, node_lookup: np.ndarray
     ) -> dict[int, DAGMCSurface]:
         """Add surfaces to MOAB model.
 
         Return map from Gmsh tag to MOAB handle.
         """
         surface_map: dict[int, DAGMCSurface] = {}
+        boundary_surface_handles: dict[str, list[np.uint64]] = {}
         surface_dimtags = gmsh.model.get_entities(2)
         surface_tags = [s[1] for s in surface_dimtags]
         logger.debug(f"Mesh has {len(surface_tags)} surfaces")
@@ -1032,19 +1043,22 @@ class DAGMCModel(MOABModel):
             if (
                 bc := mesh.entity_metadata(2, surface_tag).boundary_condition
             ) is not None:
-                surface_set.boundary = bc
+                boundary_surface_handles.setdefault(bc, []).append(surface_set.handle)
 
-            self._create_surface_elements(surface_tag, surface_set, node_tag_map)
+            self._create_surface_elements(surface_tag, surface_set, node_lookup)
             self._create_volume_friend_for_lonely_surfaces(surface_tag, surface_set)
             log_progress(logger, "Creating DAGMC surfaces", i, len(surface_tags))
+
+        for bc, handles in boundary_surface_handles.items():
+            self._create_batched_group(f"boundary:{bc}", handles)
 
         return surface_map
 
     def _create_surface_elements(
-        self, surface_tag: int, surface_set: DAGMCSurface, node_tag_map: dict[int, int]
+        self, surface_tag: int, surface_set: DAGMCSurface, node_lookup: np.ndarray
     ):
         """Process elements for a single surface."""
-        triangles = self._create_elements(2, surface_tag, node_tag_map)
+        triangles = self._create_elements(2, surface_tag, node_lookup)
         if not triangles:
             raise RuntimeError(f"Surface {surface_tag} has no elements")
 
@@ -1075,17 +1089,32 @@ class DAGMCModel(MOABModel):
         volume_dimtags = gmsh.model.get_entities(3)
         volume_tags = [v[1] for v in volume_dimtags]
         volume_map: dict[int, DAGMCVolume] = {}
+        material_volume_handles: dict[str, list[np.uint64]] = {}
+        part_volume_handles: dict[str, list[np.uint64]] = {}
+        grouped_order: list[tuple[str, str]] = []
         logger.debug(f"Mesh has {len(volume_tags)} volumes")
 
         for i, volume_tag in enumerate(volume_tags, start=1):
             volume_set = self.create_volume(volume_tag)
             volume_map[volume_tag] = volume_set
             metadata = mesh.entity_metadata(3, volume_tag)
-            mat_name = metadata.material
-            volume_set.material = mat_name
+            mat_name = str(metadata.material)
+            if mat_name not in material_volume_handles:
+                material_volume_handles[mat_name] = []
+                grouped_order.append(("mat", mat_name))
+            material_volume_handles[mat_name].append(volume_set.handle)
             if (part_name := metadata.part) is not None:
-                volume_set.part = part_name
+                if part_name not in part_volume_handles:
+                    part_volume_handles[part_name] = []
+                    grouped_order.append(("part", part_name))
+                part_volume_handles[part_name].append(volume_set.handle)
             log_progress(logger, "Creating DAGMC volumes", i, len(volume_tags))
+
+        for group_type, name in grouped_order:
+            if group_type == "mat":
+                self._create_batched_group(f"mat:{name}", material_volume_handles[name])
+            else:
+                self._create_batched_group(f"part:{name}", part_volume_handles[name])
 
         next_group_id = max((g.global_id for g in self.groups), default=0) + 1
         for dim, physical_tag in gmsh.model.get_physical_groups(3):
@@ -1124,6 +1153,19 @@ class DAGMCModel(MOABModel):
         # https://github.com/Thea-Energy/neutronics-cad/issues/5
         self._core.tag_set_data(self.faceting_tol_tag, file_set, 0.1)
         self._core.add_entities(file_set, all_entities)
+
+    def _next_group_id(self) -> int:
+        """Return the next available DAGMC group global ID."""
+        return max((group.global_id for group in self.groups), default=0) + 1
+
+    def _create_batched_group(
+        self, name: str, handles: Iterable[np.uint64]
+    ) -> DAGMCGroup:
+        """Create a group once and add all handles in a single add_entities call."""
+        group = self.create_group(name)
+        group.global_id = self._next_group_id()
+        self._core.add_entities(group.handle, np.asarray(handles, dtype=np.uint64))
+        return group
 
     @classmethod
     def make_from_mesh(cls, mesh: Mesh) -> DAGMCModel:
@@ -1185,10 +1227,10 @@ class MOABVolumeModel(MOABModel):
         model = cls(core)
         with mesh:
             gmsh.model.mesh.removeDuplicateNodes()
-            node_map = model._add_nodes()
+            node_lookup = model._add_nodes()
 
             # Simply add all 3D elements to the root set
             for _, tag in gmsh.model.get_entities(3):
-                model._create_elements(3, tag, node_map)
+                model._create_elements(3, tag, node_lookup)
 
         return model
