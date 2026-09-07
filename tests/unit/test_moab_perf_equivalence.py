@@ -287,3 +287,20 @@ def test_create_elements_handles_multiple_element_types(monkeypatch):
     assert (
         len(model._core.get_entities_by_type(model.root_set, pymoab.types.MBTET)) == 1
     )
+
+
+def test_create_elements_raises_on_unknown_node_tag(monkeypatch):
+    model = sm.MOABModel(pymoab.core.Core())
+    node_lookup = np.zeros(5, dtype=np.uint64)
+
+    def _mock_get_elements(_dim, _tag):
+        return (
+            np.array([2], dtype=np.int32),
+            [np.array([1], dtype=np.uint64)],
+            [np.array([1, 2, 9], dtype=np.uint64)],
+        )
+
+    monkeypatch.setattr(sm_moab.gmsh.model.mesh, "get_elements", _mock_get_elements)
+
+    with pytest.raises(ValueError, match="Encountered unknown node tag"):
+        model._create_elements(2, 1, node_lookup)

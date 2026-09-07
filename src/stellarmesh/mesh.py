@@ -408,8 +408,11 @@ class Mesh:
                         if "Incompatible cell data 'gmsh:physical'" not in str(exc):
                             raise
                         gmsh.option.set_number("Mesh.SaveAll", 0)
-                        gmsh.write(tmp_mesh.name)
-                        mesh = meshio.read(tmp_mesh.name)
+                        try:
+                            gmsh.write(tmp_mesh.name)
+                            mesh = meshio.read(tmp_mesh.name)
+                        finally:
+                            gmsh.option.set_number("Mesh.SaveAll", 1 if save_all else 0)
                     meshio.write(filename, mesh)
             else:
                 gmsh.write(str(filename))
