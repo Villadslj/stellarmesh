@@ -304,3 +304,22 @@ def test_create_elements_raises_on_unknown_node_tag(monkeypatch):
 
     with pytest.raises(ValueError, match="Encountered unknown node tag"):
         model._create_elements(2, 1, node_lookup)
+
+
+def test_create_elements_raises_on_incompatible_connectivity_length(monkeypatch):
+    model = sm.MOABModel(pymoab.core.Core())
+    node_lookup = np.arange(6, dtype=np.uint64)
+
+    def _mock_get_elements(_dim, _tag):
+        return (
+            np.array([2], dtype=np.int32),
+            [np.array([1], dtype=np.uint64)],
+            [np.array([1, 2], dtype=np.uint64)],
+        )
+
+    monkeypatch.setattr(sm_moab.gmsh.model.mesh, "get_elements", _mock_get_elements)
+
+    with pytest.raises(
+        ValueError, match="connectivity length is incompatible with element type"
+    ):
+        model._create_elements(2, 1, node_lookup)

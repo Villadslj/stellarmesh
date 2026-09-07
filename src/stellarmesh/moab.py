@@ -655,6 +655,10 @@ class MOABModel:
             conn = node_lookup[node_tags_array]
             if np.any(conn == 0):
                 raise ValueError("Encountered unknown node tag when creating elements.")
+            if node_tags_array.size % nodes_per_elem != 0:
+                raise ValueError(
+                    "Element connectivity length is incompatible with element type."
+                )
             conn = conn.reshape(-1, nodes_per_elem)
             new_handles = self._core.create_elements(moab_type, conn)
             all_new_handles.merge(new_handles)
