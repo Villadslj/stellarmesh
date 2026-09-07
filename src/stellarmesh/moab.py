@@ -1052,8 +1052,12 @@ class DAGMCModel(MOABModel):
             self._create_volume_friend_for_lonely_surfaces(surface_tag, surface_set)
             log_progress(logger, "Creating DAGMC surfaces", i, len(surface_tags))
 
+        next_group_id = self._next_group_id()
         for bc, handles in boundary_surface_handles.items():
-            self._create_batched_group(f"boundary:{bc}", handles)
+            self._create_batched_group(
+                f"boundary:{bc}", handles, group_id=next_group_id
+            )
+            next_group_id += 1
 
         return surface_map
 
@@ -1119,11 +1123,21 @@ class DAGMCModel(MOABModel):
                 )
             log_progress(logger, "Creating DAGMC volumes", i, len(volume_tags))
 
+        next_group_id = self._next_group_id()
         for group_type, name in grouped_order:
             if group_type == "mat":
-                self._create_batched_group(f"mat:{name}", material_volume_handles[name])
+                self._create_batched_group(
+                    f"mat:{name}",
+                    material_volume_handles[name],
+                    group_id=next_group_id,
+                )
             else:
-                self._create_batched_group(f"part:{name}", part_volume_handles[name])
+                self._create_batched_group(
+                    f"part:{name}",
+                    part_volume_handles[name],
+                    group_id=next_group_id,
+                )
+            next_group_id += 1
 
         self._add_assembly_groups(volume_map)
         self._set_surface_sense(mesh, surface_map, volume_map)
@@ -1183,12 +1197,15 @@ class DAGMCModel(MOABModel):
         return max((group.global_id for group in self.groups), default=0) + 1
 
     def _create_batched_group(
-        self, name: str, handles: Iterable[np.uint64]
+        self,
+        name: str,
+        handles: Iterable[np.uint64],
+        *,
+        group_id: Optional[int] = None,
     ) -> DAGMCGroup:
         """Create a group once and add all handles in a single add_entities call."""
-        next_group_id = self._next_group_id()
         group = self.create_group(name)
-        group.global_id = next_group_id
+        group.global_id = self._next_group_id() if group_id is None else group_id
         self._core.add_entities(group.handle, np.asarray(handles, dtype=np.uint64))
         return group
 
@@ -1270,6 +1287,7 @@ class MOABVolumeModel(MOABModel):
 
             # Simply add all 3D elements to the root set
             for _, tag in gmsh.model.get_entities(3):
-                model._create_elements(3, tag, node_lookup)
+                elements = model._create_elements(3, tag, node_lookup)
+                model._core.add_entities(model.root_set, elements)
 
         return model
