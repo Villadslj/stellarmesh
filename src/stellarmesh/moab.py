@@ -1105,14 +1105,14 @@ class DAGMCModel(MOABModel):
             volume_set = self.create_volume(volume_tag)
             volume_map[volume_tag] = volume_set
             metadata = mesh.entity_metadata(3, volume_tag)
-            mat_name = str(metadata.material)
-            self._append_group_member(
-                material_volume_handles,
-                grouped_order,
-                "mat",
-                mat_name,
-                volume_set.handle,
-            )
+            if (mat_name := metadata.material) is not None:
+                self._append_group_member(
+                    material_volume_handles,
+                    grouped_order,
+                    "mat",
+                    str(mat_name),
+                    volume_set.handle,
+                )
             if (part_name := metadata.part) is not None:
                 self._append_group_member(
                     part_volume_handles,
