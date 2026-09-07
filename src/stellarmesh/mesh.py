@@ -402,7 +402,14 @@ class Mesh:
             if use_meshio:
                 with tempfile.NamedTemporaryFile(suffix=".msh") as tmp_mesh:
                     gmsh.write(tmp_mesh.name)
-                    mesh = meshio.read(tmp_mesh.name)
+                    try:
+                        mesh = meshio.read(tmp_mesh.name)
+                    except ValueError as exc:
+                        if "Incompatible cell data 'gmsh:physical'" not in str(exc):
+                            raise
+                        gmsh.option.set_number("Mesh.SaveAll", 0)
+                        gmsh.write(tmp_mesh.name)
+                        mesh = meshio.read(tmp_mesh.name)
                     meshio.write(filename, mesh)
             else:
                 gmsh.write(str(filename))

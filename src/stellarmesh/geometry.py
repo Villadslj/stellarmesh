@@ -479,6 +479,11 @@ class Geometry:
             """Remove Onshape's per-instance suffix, e.g. `` <4>``."""
             return re.sub(r"\s*<\d+>$", "", name).strip()
 
+        def _is_generic_instance_name(name: str) -> bool:
+            """Return whether STEP instance names are placeholder-like values."""
+            normalized = _normalize_assembly_name(name)
+            return normalized.isdigit()
+
         def _collect_names_from_label(
             label: TDF_Label,
             parent_assemblies: Sequence[str],
@@ -491,8 +496,12 @@ class Geometry:
 
             assemblies = list(parent_assemblies)
             if _get_ocp_method(shape_tool, "IsAssembly")(label):
-                assembly_name = _normalize_assembly_name(
-                    instance_name or _get_label_name(label)
+                label_name = _normalize_assembly_name(_get_label_name(label))
+                instance_label = _normalize_assembly_name(instance_name)
+                assembly_name = (
+                    label_name
+                    if not instance_label or _is_generic_instance_name(instance_label)
+                    else instance_label
                 )
                 if assembly_name and assembly_name not in assemblies:
                     assemblies.append(assembly_name)
