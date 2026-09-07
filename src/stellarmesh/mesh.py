@@ -407,18 +407,23 @@ class Mesh:
                     except ValueError as exc:
                         if "Incompatible cell data 'gmsh:physical'" not in str(exc):
                             raise
+                        set_number = getattr(gmsh.option, "set_number", None) or getattr(
+                            gmsh.option, "setNumber", None
+                        )
                         get_number = getattr(gmsh.option, "get_number", None) or getattr(
                             gmsh.option, "getNumber", None
                         )
-                        if get_number is None:
-                            raise AttributeError("No compatible Gmsh option getter found")
+                        if set_number is None or get_number is None:
+                            raise AttributeError(
+                                "No compatible Gmsh option getter/setter found"
+                            )
                         previous_save_all = get_number("Mesh.SaveAll")
-                        gmsh.option.set_number("Mesh.SaveAll", 0)
+                        set_number("Mesh.SaveAll", 0)
                         try:
                             gmsh.write(tmp_mesh.name)
                             mesh = meshio.read(tmp_mesh.name)
                         finally:
-                            gmsh.option.set_number("Mesh.SaveAll", previous_save_all)
+                            set_number("Mesh.SaveAll", previous_save_all)
                     meshio.write(filename, mesh)
             else:
                 gmsh.write(str(filename))

@@ -1203,10 +1203,11 @@ class DAGMCModel(MOABModel):
         *,
         group_id: Optional[int] = None,
     ) -> DAGMCGroup:
-        """Create a group once and add all handles in a single add_entities call."""
+        """Create a group and add all handles preserving entity-set relationships."""
         group = self.create_group(name)
         group.global_id = self._next_group_id() if group_id is None else group_id
-        self._core.add_entities(group.handle, np.asarray(handles, dtype=np.uint64))
+        for handle in np.asarray(handles, dtype=np.uint64):
+            group.add(EntitySet(self, np.uint64(handle)))
         return group
 
     @staticmethod
